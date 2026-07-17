@@ -58,32 +58,58 @@ class FactionListItem(BaseModel):
     system_count: int = 0
 
 
+class PaginatedFactions(BaseModel):
+    total: int
+    page: int
+    limit: int
+    items: list[FactionListItem]
+
+
 # ---------------------------------------------------------------------------
 # Per-system entry for a faction's territory view
 # ---------------------------------------------------------------------------
 
 
-class Coords(BaseModel):
-    x: float
-    y: float
-    z: float
-
-
 class FactionSystemEntry(BaseModel):
     """A system in which a faction has presence, enriched with latest PP state."""
-
-    model_config = _from_orm
 
     system_name: str
     system_id64: int
     is_controlling: bool
-    coords: Optional[Coords] = None
+    # Flat coordinates (LY)
+    x: float
+    y: float
+    z: float
     pp_state: Optional[str] = None
     pp_power: Optional[str] = None
     # 0.0–1.0; multiply by 100 for display as a percentage
     influence: Optional[float] = None
-    # Computed when caller supplies a center system; Euclidean LY distance
+    # Computed when caller supplies a center_id query param; Euclidean LY distance
     distance_from_center: Optional[float] = None
+
+
+# ---------------------------------------------------------------------------
+# Powers list
+# ---------------------------------------------------------------------------
+
+
+class PowersList(BaseModel):
+    powers: list[str]
+
+
+# ---------------------------------------------------------------------------
+# System search result
+# ---------------------------------------------------------------------------
+
+
+class SystemSearchResult(BaseModel):
+    model_config = _from_orm
+
+    system_id64: int
+    name: str
+    x: Optional[float] = None
+    y: Optional[float] = None
+    z: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -119,3 +145,9 @@ class RecommendationItem(BaseModel):
     influence: Optional[float] = None
     # "rising" | "falling" | "stable" | "unknown"
     influence_trend: str = "unknown"
+
+
+class RecommendationsResponse(BaseModel):
+    fortify: list[RecommendationItem]
+    expand: list[RecommendationItem]
+    llm_summary: Optional[str] = None

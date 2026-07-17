@@ -1,6 +1,8 @@
-/** Factions API client. */
+/** Factions API client — typed fetch wrappers for all factions endpoints. */
 
-import { getAuthHeader } from "./admin";
+// ---------------------------------------------------------------------------
+// Types (mirror Pydantic schemas exactly)
+// ---------------------------------------------------------------------------
 
 export interface FactionListItem {
   id: number;
@@ -10,52 +12,67 @@ export interface FactionListItem {
   system_count: number;
 }
 
-export interface Coords {
-  x: number;
-  y: number;
-  z: number;
+export interface PaginatedFactions {
+  total: number;
+  page: number;
+  limit: number;
+  items: FactionListItem[];
 }
 
 export interface FactionSystemEntry {
   system_name: string;
   system_id64: number;
   is_controlling: boolean;
-  coords: Coords | null;
+  x: number;
+  y: number;
+  z: number;
   pp_state: string | null;
   pp_power: string | null;
+  /** 0.0–1.0 — multiply by 100 to display as a percentage */
   influence: number | null;
+  /** Euclidean LY distance from the selected center system (null if not requested) */
   distance_from_center: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// API functions
+// ---------------------------------------------------------------------------
+
+export async function listFactions(
+  page = 1,
+  limit = 50,
+): Promise<PaginatedFactions> {
+  const res = await fetch(`/api/factions?page=${page}&limit=${limit}`);
+  if (!res.ok) throw new Error(`Faction list failed (${res.status})`);
+  return res.json() as Promise<PaginatedFactions>;
 }
 
 export async function searchFactions(q: string): Promise<FactionListItem[]> {
   const res = await fetch(
-    `/api/factions/search?q=${encodeURIComponent(q)}`
+    `/api/factions/search?q=${encodeURIComponent(q)}`,
   );
   if (!res.ok) throw new Error(`Faction search failed (${res.status})`);
   return res.json() as Promise<FactionListItem[]>;
 }
 
-export async function listFactions(
-  page = 1,
-  limit = 50
-): Promise<FactionListItem[]> {
-  const res = await fetch(`/api/factions?page=${page}&limit=${limit}`);
-  if (!res.ok) throw new Error(`Faction list failed (${res.status})`);
-  return res.json() as Promise<FactionListItem[]>;
+export async function getPowers(): Promise<string[]> {
+  const res = await fetch("/api/factions/powers");
+  if (!res.ok) throw new Error(`Powers list failed (${res.status})`);
+  const data = await res.json() as { powers: string[] };
+  return data.powers;
 }
 
 export async function getFactionSystems(
   factionName: string,
-  centerSystemId64?: number
+  centerSystemId64?: number,
 ): Promise<FactionSystemEntry[]> {
   const params = new URLSearchParams();
   if (centerSystemId64 != null) {
     params.set("center_id", String(centerSystemId64));
   }
-  const qs = params.toString() ? `?${params.toString()}` : "";
+  const qs = params.size > 0 ? `?${params.toString()}` : "";
   const res = await fetch(
     `/api/factions/${encodeURIComponent(factionName)}/systems${qs}`,
-    { headers: getAuthHeader() }
   );
   if (!res.ok) throw new Error(`Get faction systems failed (${res.status})`);
   return res.json() as Promise<FactionSystemEntry[]>;
