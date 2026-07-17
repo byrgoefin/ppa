@@ -1,21 +1,40 @@
-# Python 3.13 required — Python 3.14 has no pre-built wheels for pydantic-core or psycopg.
-# Create your venv with:  python3.13 -m venv .venv
-#
-# pydantic>=2.11  →  pydantic-core>=2.33  →  pyo3>=0.23  →  supports py3.13 wheels
-# psycopg[binary]>=3.2  →  psycopg3, pure-python fallback, no C extension required
+# ============================================================
+# Python 3.13 required.
+# Install:
+#   git pull
+#   pip cache purge
+#   pip install --no-cache-dir -r requirements.txt
+# ============================================================
 
+# Core web framework
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
+python-multipart>=0.0.12
+
+# Config / env
 python-dotenv>=1.0.1
+
+# Database — psycopg3 (NOT psycopg2-binary, which requires Python <=3.12 C headers)
 sqlalchemy>=2.0.36
+psycopg[binary]>=3.2.0
+
+# Validation — pydantic 2.11+ ships pydantic-core 2.33+ which has py3.13 wheels
 pydantic>=2.11.0
 pydantic-core>=2.33.0
-python-multipart>=0.0.12
+
+# Auth
 python-jose[cryptography]>=3.3.0
 bcrypt>=4.2.0
-psycopg[binary]>=3.2.0
+
+# HTTP clients
 httpx>=0.27.0
 requests>=2.32.3
+
+# Streaming JSON parse for Spansh bulk download
 ijson>=3.3.0
+
+# Task scheduling
 apscheduler>=3.10.4
+
+# OpenAI / LLM integration
 openai>=1.50.0
