@@ -5,9 +5,16 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 # PostgreSQL connection URL from environment; no SQLite fallback in this app.
-DATABASE_URL: str = os.getenv(
+# Rewrite postgresql:// → postgresql+psycopg:// so SQLAlchemy uses the psycopg3
+# driver (psycopg[binary]) which supports Python 3.12+.
+_raw_url: str = os.getenv(
     "DATABASE_URL",
     "postgresql://pp_user:pp_password@localhost:5432/elite_powerplay",
+)
+DATABASE_URL = _raw_url.replace(
+    "postgresql://", "postgresql+psycopg://", 1
+).replace(
+    "postgresql+psycopg2://", "postgresql+psycopg://", 1
 )
 
 engine = create_engine(DATABASE_URL)
