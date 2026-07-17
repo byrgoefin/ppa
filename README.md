@@ -6,8 +6,8 @@ produces AI-assisted fortify/expand recommendations backed by rule-based scoring
 
 ## Stack
 
-- **Backend** — Python 3.12, FastAPI, SQLAlchemy, PostgreSQL
-- **Frontend** — React 18, TypeScript, Vite 5, D3.js, react-three-fiber (Three.js)
+- **Backend** — Python **3.13**, FastAPI, SQLAlchemy, PostgreSQL
+- **Frontend** — React 18, TypeScript, Vite 6, D3.js, react-three-fiber (Three.js)
 - **Ingestion** — Spansh `factions.json.gz` (streaming via `ijson`) + EDSM API
 - **Auth** — Admin-only JWT (HS256, 8-hour expiry); read views are public
 
@@ -38,10 +38,15 @@ The backend creates all database tables automatically on first startup.
 
 ### Backend
 
+> **Python 3.13 is required.** Python 3.14 has no pre-built binary wheels for
+> `pydantic-core` or `psycopg` yet, so the build will fail on 3.14.
+> Install Python 3.13 first: `sudo apt install python3.13 python3.13-venv`
+
 ```bash
 cd backend
-python -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install --upgrade pip
 pip install -r requirements.txt
 cp .env.example .env               # edit DATABASE_URL and SECRET_KEY
 uvicorn main:app --reload
@@ -82,30 +87,26 @@ App available at <http://localhost:5173> (proxies `/api` → `http://localhost:8
 | # | Description | Status |
 |---|---|---|
 | 1 | Project Scaffold & Database Schema | ✅ Done |
-| 2 | Spansh Data Ingestion Service | ⬜ Pending |
-| 3 | EDSM Power Play Sync Service | ⬜ Pending |
-| 4 | Factions & Systems API Endpoints | ⬜ Pending |
-| 5 | Recommendation Engine (Rule-Based) | ⬜ Pending |
-| 6 | LLM Summary Integration | ⬜ Pending |
-| 7 | Frontend: Selectors & Table View | ⬜ Pending |
-| 8 | Frontend: 2D Map View | ⬜ Pending |
-| 9 | Frontend: 3D Map View | ⬜ Pending |
-| 10 | Admin Panel & Ingestion Status UI | ⬜ Pending |
+| 2 | Spansh Data Ingestion Service | ✅ Done |
+| 3 | EDSM Power Play Sync Service | ✅ Done |
+| 4 | Factions & Systems API Endpoints | ✅ Done |
+| 5 | Recommendation Engine (Rule-Based) | ✅ Done |
+| 6 | LLM Summary Integration | ✅ Done |
+| 7 | Frontend: Selectors & Table View | ✅ Done |
+| 8 | Frontend: 2D Map View | ✅ Done |
+| 9 | Frontend: 3D Map View | ✅ Done |
+| 10 | Admin Panel & Ingestion Status UI | ✅ Done |
 
 ---
 
 ## Creating the first admin user
 
-After the backend starts, you can create an admin user directly via the Python REPL or a migration script:
+Use the included utility script (run from the `backend/` directory):
 
-```python
-from db.session import SessionLocal
-from models.models import AdminUser
-from routers.auth import hash_password
-
-db = SessionLocal()
-user = AdminUser(email="admin@example.com", hashed_password=hash_password("yourpassword"))
-db.add(user)
-db.commit()
-db.close()
+```bash
+python3 create_admin.py
+# or with custom credentials:
+ADMIN_EMAIL=you@example.com ADMIN_PASSWORD=s3cr3t python3 create_admin.py
 ```
+
+The script is idempotent — running it twice will not create duplicate users.

@@ -1,8 +1,15 @@
+# Python 3.13 required — Python 3.14 has no pre-built wheels for pydantic-core or psycopg.
+# Create your venv with:  python3.13 -m venv .venv
+#
+# pydantic>=2.11  →  pydantic-core>=2.33  →  pyo3>=0.23  →  supports py3.13 wheels
+# psycopg[binary]>=3.2  →  psycopg3, pure-python fallback, no C extension required
+
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-dotenv>=1.0.1
 sqlalchemy>=2.0.36
-pydantic>=2.9.0
+pydantic>=2.11.0
+pydantic-core>=2.33.0
 python-multipart>=0.0.12
 python-jose[cryptography]>=3.3.0
 bcrypt>=4.2.0
