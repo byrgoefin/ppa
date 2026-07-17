@@ -15,6 +15,7 @@ from models.schemas import (
     PowersList,
     RecommendationsResponse,
 )
+from services.scoring import compute_recommendations
 
 router = APIRouter(prefix="/factions", tags=["factions"])
 
@@ -220,15 +221,16 @@ def get_faction_systems(
 
 
 # ---------------------------------------------------------------------------
-# GET /api/factions/{name}/recommendations  — placeholder
+# GET /api/factions/{name}/recommendations
 # ---------------------------------------------------------------------------
 
 
 @router.get("/{name}/recommendations", response_model=RecommendationsResponse)
 def get_faction_recommendations(
     name: str,
-    center: Optional[int] = Query(default=None),
+    center_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> RecommendationsResponse:
-    """Placeholder — full implementation in Sub-Task 5."""
-    return RecommendationsResponse(fortify=[], expand=[], llm_summary=None)
+    """Return rule-based fortify and expand recommendations for a faction."""
+    result = compute_recommendations(name, center_id, db)
+    return RecommendationsResponse(**result)
