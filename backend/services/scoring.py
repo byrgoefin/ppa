@@ -406,9 +406,12 @@ def compute_recommendations(
         {
             "fortify":     [RecommendationItem, ...],   # sorted by score desc, max 20
             "expand":      [RecommendationItem, ...],   # sorted by score desc, max 20
-            "llm_summary": None,                        # populated by Sub-Task 6
+            "llm_summary": str | None,
         }
     """
+    import logging
+    import os
+
     weights = load_weights(db)
     pp_states = get_latest_pp_states(db)
 
@@ -426,8 +429,9 @@ def compute_recommendations(
         .all()
     )
 
-    # Resolve center system coordinates
+    # Resolve center system coordinates and name
     center_coords: Optional[tuple[float, float, float]] = None
+    center_name: Optional[str] = None
     if center_system_id64 is not None:
         center_sys = (
             db.query(System)
@@ -440,6 +444,7 @@ def compute_recommendations(
                 center_sys.y or 0.0,
                 center_sys.z or 0.0,
             )
+            center_name = center_sys.name
 
     fortify = compute_fortify_scores(
         faction_name, center_coords, presence_rows, pp_states, db, weights
@@ -454,8 +459,22 @@ def compute_recommendations(
         faction.allegiance,
     )
 
-    return {
+    result: dict = {
         "fortify": fortify[:20],
         "expand": expand[:20],
         "llm_summary": None,
     }
+
+    if os.getenv("LLM_ENABLED", "false").lower() == "true":
+        try:
+            from ai.factory import get_provider
+            provider = get_provider()
+            fortify_dicts = [item.model_dump() for item in fortify[:5]]
+            expand_dicts = [item.model_dump() for item in expand[:5]]
+            result["llm_summary"] = provider.summarize_recommendations(
+                faction_name, center_name, fortify_dicts, expand_dicts
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("LLM summary failed: %s", exc)
+
+    return result
