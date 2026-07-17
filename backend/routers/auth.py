@@ -5,6 +5,7 @@ import base64
 import os
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -13,13 +14,10 @@ from db.session import get_db
 from models.models import AdminUser
 
 from jose import jwt
-from passlib.context import CryptContext
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 8
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -29,18 +27,18 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ---------------------------------------------------------------------------
 
 
-def _prepare_password(password: str) -> str:
-    """Pre-hash with SHA-256 + base64 to avoid bcrypt's 72-byte limit."""
+def _prepare_password(password: str) -> bytes:
+    """SHA-256 + base64 pre-hash so any length password fits in 72 bytes."""
     digest = hashlib.sha256(password.encode("utf-8")).digest()
-    return base64.b64encode(digest).decode("utf-8")
+    return base64.b64encode(digest)
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(_prepare_password(password))
+    return bcrypt.hashpw(_prepare_password(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(_prepare_password(plain), hashed)
+    return bcrypt.checkpw(_prepare_password(plain), hashed.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
