@@ -6,14 +6,14 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Form, HTTPException, status
 from sqlalchemy.orm import Session
 
 from db.session import get_db
 from models.models import AdminUser
 
 from jose import jwt
+from pydantic import BaseModel
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 ALGORITHM = "HS256"
@@ -41,16 +41,6 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(_prepare_password(plain), hashed.encode("utf-8"))
 
 
-# ---------------------------------------------------------------------------
-# Pydantic schemas (local — only used by this router)
-# ---------------------------------------------------------------------------
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
@@ -62,10 +52,19 @@ class TokenResponse(BaseModel):
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    """Verify admin credentials and issue a signed JWT valid for 8 hours."""
-    user = db.query(AdminUser).filter(AdminUser.email == body.email).first()
-    if not user or not verify_password(body.password, user.hashed_password):
+def login(
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Verify admin credentials and issue a signed JWT valid for 8 hours.
+
+    Accepts application/x-www-form-urlencoded with fields ``username`` (email)
+    and ``password`` — matching the OAuth2 password flow convention used by
+    the frontend.
+    """
+    user = db.query(AdminUser).filter(AdminUser.email == username).first()
+    if not user or not verify_password(password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
