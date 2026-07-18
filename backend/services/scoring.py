@@ -36,21 +36,18 @@ STATE TRANSITIONS:
   Exploited  → Fortified  if progress ≥ 1.0
   Fortified  → Stronghold if progress ≥ 1.0
 
-DAYS-TO-FAILURE (correct formula):
-  control_progress IS the normalised time-remaining fraction within the cycle.
-  progress=1.0 means 7 days of full-cycle activity above threshold.
-  progress=0.0 means the buffer is fully depleted — state change this cycle.
+DAYS-TO-FAILURE (correct formula, verified against HR 943 live data):
+  buffer_merits   = progress × band_width   (absolute merits above downgrade threshold)
+  daily_net_loss  = undermining − reinforcement   (current snapshot as daily-rate proxy)
+  days_to_failure = buffer_merits / daily_net_loss
 
-      days_to_failure = progress × 7
+  Example — HR 943 (R=36, U=525, progress=0.2666, Exploited, band=213,000):
+    buffer  = 0.2666 × 213,000 = 56,786 merits
+    net     = 525 − 36         = 489 merits/day loss
+    days    = 56,786 / 489     = 116 days  → MONITOR band
 
-  This is the correct formula because progress already encodes how far through
-  the [downgrade..upgrade] merit band the system sits.  R and U from the current
-  snapshot only represent THIS cycle's activity and cannot reliably project a rate
-  without historical data (a system can have low R and low U but still be healthy
-  because it accumulated merits in prior cycles — the progress field captures that).
-
-  When historical snapshots ARE available, the trend (improving/worsening) refines
-  the urgency score as a multiplier, but does NOT change days_to_failure directly.
+  Returns 0.0  if progress ≤ 0 (buffer already exhausted — downgrade NOW)
+  Returns None if R ≥ U        (gaining merits — no failure risk)
 
   Additional merit context displayed to players:
     buffer_merits     = progress × band_width  (absolute cushion above downgrade)
@@ -298,19 +295,22 @@ def _fortify_urgency(
 
     Returns (score, reasons, days_to_failure).
 
-    Score semantics:
-      1000  = failing right now (progress ≤ 0)
-      800+  = < 2 days to failure
-      600+  = < 5 days to failure
-      300+  = net negative, at risk this cycle
-      150+  = healthy but close to upgrade threshold (reinforce bonus)
-        0   = healthy, no action needed
-      -1    = skip entirely (Stronghold, already maxed)
+    days_to_failure = buffer_merits / abs(U - R)
+      where buffer_merits = progress × band_width (absolute merits above downgrade).
+
+    Urgency bands (calibrated to merit-based days):
+      CRITICAL  (1000) : progress ≤ 0 — downgrade happening NOW
+      URGENT    ( 800) : < 7 days  (less than one full cycle)
+      WARNING   ( 600) : < 21 days (less than three cycles)
+      MONITOR   ( 300) : net negative but > 21 days
+      UPGRADE   ( 150) : net positive, within 20% of upgrade threshold
+        0              : healthy, no action needed
+       -1              : skip (healthy Stronghold)
     """
     r   = reinforcement or 0
     u   = undermining   or 0
     p   = control_progress if control_progress is not None else 0.5
-    net = r - u   # positive = reinforcement winning, negative = undermining winning
+    net = r - u   # positive = R winning, negative = U winning
 
     score:   float      = 0.0
     reasons: list[str]  = []
@@ -327,11 +327,12 @@ def _fortify_urgency(
             reasons.append(f"Merit position: {mf['merit_position']:,} (below {MERIT_STRONGHOLD:,} threshold)")
             days_to_failure = 0.0
             return score, reasons, days_to_failure
-        elif p < 0.05:
+        elif p < 0.10:
             score = SCORE_URGENT
-            days_to_failure = _estimate_days(p)
-            reasons.append(f"Stronghold at risk of dropping to Fortified (progress {p:.1%}, ~{days_to_failure:.1f}d)")
-            reasons.append(f"Buffer: {mf['buffer_merits']:,} merits above downgrade · Need {mf['merits_to_safety']:,} to reach safety")
+            days_to_failure = _estimate_days(p, power_state, r, u)
+            d_str = f"~{days_to_failure:.1f}d" if days_to_failure is not None else "unknown"
+            reasons.append(f"Stronghold at risk of dropping to Fortified (progress {p:.1%}, {d_str})")
+            reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Need {mf['merits_to_safety']:,} to reach safety")
             return score, reasons, days_to_failure
         return -1.0, [], None   # healthy Stronghold — skip
 
@@ -349,29 +350,30 @@ def _fortify_urgency(
         reasons.append(f"Need {mf['merits_to_safety']:,} merits to reach safety · {mf['merits_to_upgrade']:,} to upgrade")
         return score, reasons, days_to_failure
 
-    # ── 3. Estimate days to failure using progress × 7 ────────────────────
-    days_to_failure = _estimate_days(p)
+    # ── 3. Estimate days to failure: buffer_merits / abs(U - R) ───────────
+    days_to_failure = _estimate_days(p, power_state, r, u)
 
-    if days_to_failure is not None and days_to_failure < 2.0:
+    if days_to_failure is not None and days_to_failure < 7.0:
+        # Less than one full PP cycle — urgent
         score = SCORE_URGENT
         reasons.append(
             f"⚠ URGENT: ~{days_to_failure:.1f} day{'s' if days_to_failure >= 1 else ''} "
-            f"to state downgrade (progress {p:.1%})"
+            f"to state downgrade at current rate"
         )
-        reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Need {mf['merits_to_safety']:,} to reach safety")
-    elif days_to_failure is not None and days_to_failure < 5.0:
+        reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Net: {net:+,}/day · Need {mf['merits_to_safety']:,} to reach safety")
+    elif days_to_failure is not None and days_to_failure < 21.0:
+        # Less than three cycles — warning
         score = SCORE_WARNING
         reasons.append(
-            f"⚠ WARNING: ~{days_to_failure:.1f} days to state downgrade "
-            f"(progress {p:.1%})"
+            f"⚠ WARNING: ~{days_to_failure:.1f} days to state downgrade at current rate"
         )
-        reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Need {mf['merits_to_safety']:,} to reach safety")
+        reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Net: {net:+,}/day · Need {mf['merits_to_safety']:,} to reach safety")
     elif net < 0:
-        # Net negative but not imminent — still worth monitoring
+        # Net negative but buffer is large — still worth monitoring
         score = SCORE_MONITOR
+        d_str = f"~{days_to_failure:.0f}d" if days_to_failure is not None else "unknown"
         reasons.append(
-            f"Net negative this cycle (U={u:,} R={r:,} net={net:+,}) "
-            f"— progress {p:.1%}, ~{days_to_failure:.1f}d remaining"
+            f"Net negative (U={u:,} R={r:,} net={net:+,}/day) — {d_str} at current rate"
         )
         reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Need {mf['merits_to_safety']:,} to reach safety")
     else:
@@ -407,32 +409,37 @@ def _fortify_urgency(
     return score, reasons, days_to_failure
 
 
-def _estimate_days(progress: float, *_args, **_kwargs) -> Optional[float]:
-    """Estimate days until progress reaches 0.0.
+def _estimate_days(
+    progress: float,
+    power_state: Optional[str],
+    reinforcement: int,
+    undermining: int,
+) -> Optional[float]:
+    """Estimate days until the system's merit buffer is exhausted.
 
-    control_progress is already a normalised fraction of the merit band:
-      0.0 = at downgrade threshold  (buffer exhausted)
-      1.0 = at upgrade threshold    (full buffer)
+    Formula (confirmed against HR 943 live data):
 
-    Since progress represents position within the 7-day cycle band:
+        buffer_merits    = progress × band_width
+        daily_net_loss   = abs(undermining - reinforcement)   [current snapshot as daily proxy]
+        days_to_failure  = buffer_merits / daily_net_loss
 
-        days_to_failure = progress × 7
-
-    This is the correct formula — progress encodes accumulated merit position
-    across all prior cycles, not just the current cycle's R and U activity.
-    R and U from a single snapshot are unreliable as a rate without history.
-
-    Historical trend data (improving/worsening) is used separately as a
-    score multiplier, not to adjust days_to_failure.
+    Example — HR 943 (R=36, U=525, progress=0.2666, Exploited):
+        buffer  = 0.2666 × 213,000 = 56,786 merits
+        net     = |36 − 525|       = 489 merits/day
+        days    = 56,786 / 489     = 116 days
 
     Returns 0.0 if already at or past downgrade threshold (progress ≤ 0).
-    Returns None if progress ≥ 1.0 (no failure imminent; upgrade ready).
+    Returns None if reinforcement ≥ undermining (not losing ground).
     """
     if progress <= 0.0:
         return 0.0
-    if progress >= 1.0:
-        return None   # at or past upgrade threshold — no failure risk
-    return progress * CYCLE_DAYS
+
+    net_loss = undermining - reinforcement   # positive = losing merits
+    if net_loss <= 0:
+        return None   # reinforcement winning — no failure imminent
+
+    buffer = progress * _band_width(power_state)
+    return buffer / net_loss
 
 
 def _next_state(power_state: Optional[str]) -> str:
