@@ -1,22 +1,27 @@
 """Spansh Power Play bulk ingestion service.
 
-Downloads powerplay.json.gz from Spansh and inserts a time-stamped snapshot
-row for every system in the file.  Systems themselves are upserted so their
-coordinates and allegiance stay current.
+Data source: https://downloads.spansh.co.uk/systems_populated.json.gz
 
-Schema of each object in the Spansh powerplay.json.gz array:
+Each object in the array has these PP-relevant fields (PP 2.0 schema):
 {
-  "id64": 5031654888434,
-  "name": "Cubeo",
-  "x": 46.375, "y": -87.625, "z": -0.625,
-  "power": "Arissa Lavigny-Duval",
-  "powerState": "Fortified",
-  "powerStateControlProgress": 0.0,
-  "powerStateReinforcement": 12345,
-  "powerStateUndermining": 678,
-  "allegiance": "Empire",
-  "population": 22000000
+  "id64": 10477373803,
+  "name": "Sol",
+  "coords": {"x": 0.0, "y": 0.0, "z": 0.0},
+  "allegiance": "Federation",
+  "population": 18320926115,
+  "controlling_power": "Jerome Archer",        -- single controlling power (may be null)
+  "power": ["Aisling Duval", "Jerome Archer"], -- all powers with presence
+  "power_state": "Stronghold",                 -- Stronghold|Fortified|Exploited|Turmoil|
+                                               --   InPrepareRadius|Prepared|Expansion|Contested
+  "power_state_control_progress": 0.649698,
+  "power_state_reinforcement": 66756,
+  "power_state_undermining": 124458,
+  "updated_at": "2026-07-18 03:51:09+00"
 }
+
+Systems with no PP presence have null/missing power fields — we skip those.
+We store one row per controlling_power per system so each power's territory
+can be queried independently.
 """
 
 import gzip
@@ -32,15 +37,14 @@ from models.models import IngestionRun
 
 logger = logging.getLogger(__name__)
 
-SPANSH_PP_URL = "https://downloads.spansh.co.uk/powerplay.json.gz"
+SPANSH_PP_URL = "https://downloads.spansh.co.uk/systems_populated.json.gz"
 BATCH_COMMIT_SIZE = 500
 
 
 def run_spansh_ingest(db: Session) -> IngestionRun:
-    """Stream-download the Spansh powerplay dump and store PP snapshots.
+    """Stream-download the Spansh systems_populated dump and store PP snapshots.
 
-    Creates an IngestionRun audit row, upserts pp_systems, inserts
-    pp_system_snapshots rows, and updates the run status on completion.
+    Only systems that have a ``controlling_power`` value are stored.
     """
     run = IngestionRun(
         source="spansh_pp",
@@ -57,30 +61,35 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
     records_processed = 0
 
     try:
-        logger.info("Downloading Spansh PP dump from %s", SPANSH_PP_URL)
+        logger.info("Downloading Spansh systems_populated dump from %s", SPANSH_PP_URL)
         response = requests.get(SPANSH_PP_URL, stream=True, timeout=120)
         response.raise_for_status()
         response.raw.decode_content = True
         gzip_file = gzip.GzipFile(fileobj=response.raw, mode="rb")
 
         for system_obj in ijson.items(gzip_file, "item"):
+            # Skip systems with no PP controlling power
+            controlling_power: str | None = system_obj.get("controlling_power")
+            if not controlling_power:
+                continue
+
             system_id64: int | None = system_obj.get("id64")
             if system_id64 is None:
                 continue
 
             name: str = system_obj.get("name", "")
-            x: float | None = system_obj.get("x")
-            y: float | None = system_obj.get("y")
-            z: float | None = system_obj.get("z")
+            coords = system_obj.get("coords") or {}
+            x: float | None = coords.get("x")
+            y: float | None = coords.get("y")
+            z: float | None = coords.get("z")
             allegiance: str | None = system_obj.get("allegiance")
             population: int | None = system_obj.get("population")
-            power: str | None = system_obj.get("power")
-            power_state: str | None = system_obj.get("powerState")
-            control_progress: float | None = system_obj.get("powerStateControlProgress")
-            reinforcement: int | None = system_obj.get("powerStateReinforcement")
-            undermining: int | None = system_obj.get("powerStateUndermining")
+            power_state: str | None = system_obj.get("power_state")
+            control_progress: float | None = system_obj.get("power_state_control_progress")
+            reinforcement: int | None = system_obj.get("power_state_reinforcement")
+            undermining: int | None = system_obj.get("power_state_undermining")
 
-            # Upsert the system record (coordinates + allegiance may change)
+            # Upsert the system record
             sys_result = db.execute(
                 text("""
                     INSERT INTO pp_systems (system_id64, name, x, y, z, allegiance, population)
@@ -102,7 +111,7 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
             )
             system_db_id: int = sys_result.scalar_one()
 
-            # Insert a fresh snapshot row (never upsert — we want full history)
+            # Insert a fresh snapshot row (insert-only for full history)
             db.execute(
                 text("""
                     INSERT INTO pp_system_snapshots
@@ -118,7 +127,7 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
                     "system_id": system_db_id,
                     "run_id": run_id,
                     "now": datetime.utcnow(),
-                    "power": power,
+                    "power": controlling_power,
                     "power_state": power_state,
                     "control_progress": control_progress,
                     "reinforcement": reinforcement,
@@ -129,10 +138,9 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
             records_processed += 1
             if records_processed % BATCH_COMMIT_SIZE == 0:
                 db.commit()
-                logger.debug("Spansh PP ingest: %d systems processed", records_processed)
+                logger.debug("Spansh PP ingest: %d PP systems processed", records_processed)
 
         db.commit()
-
         db.execute(
             text("""
                 UPDATE ingestion_runs
@@ -144,7 +152,7 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
         db.commit()
         db.refresh(run)
         logger.info(
-            "Spansh PP ingest completed: %d systems (run_id=%d)",
+            "Spansh PP ingest completed: %d PP systems (run_id=%d)",
             records_processed, run_id,
         )
 

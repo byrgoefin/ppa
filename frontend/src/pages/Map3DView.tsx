@@ -5,7 +5,7 @@ import * as THREE from "three";
 import { getPowerSystems, PPSystemEntry } from "../api/powers";
 import { getRecommendations, RecommendationsResponse } from "../api/recommendations";
 import { useSelectionState } from "../hooks/useSelectionState";
-import { ppStateColor, PP_STATE_LABELS } from "../constants/ppColors";
+import { ppStateColor, PP_STATE_LABELS, PP_STATES_ORDERED } from "../constants/ppColors";
 import PowerSelector from "../components/PowerSelector";
 import CenterSystemSelector from "../components/CenterSystemSelector";
 import LayoutModeSelector, { LayoutMode } from "../components/LayoutModeSelector";
@@ -172,22 +172,16 @@ export default function Map3DView() {
         {systems.length > 0 && !loading && <span style={{ fontSize: 12, color: "#57606a" }}>{systems.length} systems</span>}
       </div>
 
-      <div style={{ display: "flex", gap: 16, padding: "6px 24px", flexWrap: "wrap", borderBottom: "1px solid #e5e7eb", background: "#f7f8fa" }}>
-        {[
-          { color: "#4AD94A", label: "Fortified" },
-          { color: "#D94A4A", label: "Undermined" },
-          { color: "#FF4500", label: "Turmoil" },
-          { color: "#4A90D9", label: "Expansion" },
-          { color: "#7c5cd8", label: "Prepare Radius" },
-          { color: "#D9A84A", label: "Contested" },
-          { color: "#FFD700", label: "Center" },
-        ].map((l) => (
-          <span key={l.label} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#57606a" }}>
-            <span style={{ width: 10, height: 10, borderRadius: "50%", background: l.color, display: "inline-block" }} />
-            {l.label}
+      <div style={{ display: "flex", gap: 12, padding: "6px 24px", flexWrap: "wrap", alignItems: "center", borderBottom: "1px solid #e5e7eb", background: "#f7f8fa" }}>
+        {PP_STATES_ORDERED.map((state) => (
+          <span key={state} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#57606a" }}>
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: ppStateColor(state), display: "inline-block", flexShrink: 0 }} />
+            {PP_STATE_LABELS[state] ?? state}
           </span>
         ))}
-        <span style={{ fontSize: 12, color: "#57606a" }}>Red ring = Fortify · Blue ring = Expand · Drag to rotate · Scroll to zoom</span>
+        <span style={{ fontSize: 11, color: "#57606a", marginLeft: 4 }}>
+          · <span style={{ color: "#FFD700" }}>★</span> center · <span style={{ color: "#D94A4A" }}>●</span> Fortify · <span style={{ color: "#4A90D9" }}>●</span> Expand · Drag to rotate · Scroll to zoom
+        </span>
       </div>
 
       {powerName && systems.length > 0 ? (

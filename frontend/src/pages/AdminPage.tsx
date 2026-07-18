@@ -47,33 +47,41 @@ async function apiPatch(path: string, body: unknown) {
   return res.json();
 }
 
-// ── Default scoring weights ───────────────────────────────────────────────────
+// ── Default scoring weights (must match backend services/scoring.py DEFAULTS) ──
 const DEFAULT_WEIGHTS: Record<string, number> = {
-  fortify_turmoil:         60,
-  fortify_undermined:      50,
-  fortify_contested:       30,
-  fortify_high_ratio:      40,
-  fortify_trend_worsening: 20,
-  fortify_near_center:     10,
-  expand_in_prepare:       50,
-  expand_expansion_state:  40,
-  expand_no_controller:    30,
-  expand_proximity:        20,
-  expand_allegiance_match: 15,
+  // Fortify
+  fortify_turmoil:           70,
+  fortify_undermined:        55,
+  fortify_contested:         35,
+  fortify_exploited_ratio:   30,
+  fortify_high_ratio:        40,
+  fortify_trend_worsening:   20,
+  fortify_near_center:       10,
+  // Expand
+  expand_prepared:           60,
+  expand_in_prepare:         50,
+  expand_expansion_state:    40,
+  expand_no_controller:      30,
+  expand_proximity:          20,
+  expand_allegiance_match:   15,
 };
 
 const WEIGHT_LABELS: Record<string, string> = {
-  fortify_turmoil:         "Fortify — Turmoil (system at risk of loss)",
-  fortify_undermined:      "Fortify — Undermined state",
-  fortify_contested:       "Fortify — Contested state",
-  fortify_high_ratio:      "Fortify — High undermine ratio (>50%)",
-  fortify_trend_worsening: "Fortify — Undermining pressure increasing",
-  fortify_near_center:     "Fortify — Near center system (<15 LY)",
-  expand_in_prepare:       "Expand — InPrepareRadius state",
-  expand_expansion_state:  "Expand — Active Expansion state",
-  expand_no_controller:    "Expand — No power controls system",
-  expand_proximity:        "Expand — Close to controlled system (<20 LY)",
-  expand_allegiance_match: "Expand — Allegiance matches power",
+  // Fortify
+  fortify_turmoil:           "Fortify — Turmoil (system will be lost soon)",
+  fortify_undermined:        "Fortify — Undermined state",
+  fortify_contested:         "Fortify — Contested by another power",
+  fortify_exploited_ratio:   "Fortify — Exploited under undermining pressure (>30%)",
+  fortify_high_ratio:        "Fortify — High undermine ratio (>50%, any state)",
+  fortify_trend_worsening:   "Fortify — Undermining pressure increasing",
+  fortify_near_center:       "Fortify — Near center system (<15 LY)",
+  // Expand
+  expand_prepared:           "Expand — Prepared state (becoming expansion target)",
+  expand_in_prepare:         "Expand — InPrepareRadius state",
+  expand_expansion_state:    "Expand — Active Expansion state",
+  expand_no_controller:      "Expand — No power controls system",
+  expand_proximity:          "Expand — Close to controlled system (<20 LY)",
+  expand_allegiance_match:   "Expand — Allegiance matches power",
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────
@@ -228,18 +236,20 @@ export default function AdminPage({ onClose }: Props) {
         <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700 }}>Data Ingestion</h3>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
           <div style={{ flex: 1, minWidth: 200, background: "#f7f8fa", borderRadius: 6, padding: 14, border: "1px solid #e5e7eb" }}>
-            <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 14 }}>Spansh Factions</div>
-            <div style={{ fontSize: 12, color: "#57606a", marginBottom: 8 }}>Downloads factions.json.gz, populates faction/system/presence tables.</div>
-            {status?.spansh_next_run && <div style={{ fontSize: 11, color: "#57606a", marginBottom: 8 }}>Next run: {new Date(status.spansh_next_run).toLocaleString()}</div>}
+            <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 14 }}>Spansh PP Ingest</div>
+            <div style={{ fontSize: 12, color: "#57606a", marginBottom: 8 }}>
+              Streams <code style={{ fontSize: 11 }}>systems_populated.json.gz</code> from Spansh, populates PP system snapshots. First run may take several minutes.
+            </div>
+            {status?.spansh_next_run && <div style={{ fontSize: 11, color: "#57606a", marginBottom: 8 }}>Next scheduled: {new Date(status.spansh_next_run).toLocaleString()}</div>}
             <button onClick={() => triggerIngest("spansh")} style={{ padding: "6px 14px", fontSize: 13, background: "#3b82d4", color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", fontWeight: 600 }}>
               Run Now
             </button>
           </div>
-          <div style={{ flex: 1, minWidth: 200, background: "#f7f8fa", borderRadius: 6, padding: 14, border: "1px solid #e5e7eb" }}>
-            <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 14 }}>EDSM Power Play Sync</div>
-            <div style={{ fontSize: 12, color: "#57606a", marginBottom: 8 }}>Fetches PP state + influence for each known system from EDSM API.</div>
-            {status?.edsm_next_run && <div style={{ fontSize: 11, color: "#57606a", marginBottom: 8 }}>Next run: {new Date(status.edsm_next_run).toLocaleString()}</div>}
-            <button onClick={() => triggerIngest("edsm")} style={{ padding: "6px 14px", fontSize: 13, background: "#7c5cd8", color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", fontWeight: 600 }}>
+          <div style={{ flex: 1, minWidth: 200, background: "#f7f8fa", borderRadius: 6, padding: 14, border: "1px solid #e5e7eb", opacity: 0.55 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 14 }}>EDSM Sync <span style={{ fontSize: 11, fontWeight: 400, color: "#999" }}>(reserved)</span></div>
+            <div style={{ fontSize: 12, color: "#57606a", marginBottom: 8 }}>Additional data enrichment from EDSM. Not yet active.</div>
+            {status?.edsm_next_run && <div style={{ fontSize: 11, color: "#57606a", marginBottom: 8 }}>Next scheduled: {new Date(status.edsm_next_run).toLocaleString()}</div>}
+            <button disabled style={{ padding: "6px 14px", fontSize: 13, background: "#ccc", color: "#fff", border: "none", borderRadius: 5, cursor: "not-allowed", fontWeight: 600 }}>
               Run Now
             </button>
           </div>

@@ -1,12 +1,25 @@
-"""Power Play recommendation scoring engine.
+"""Power Play 2.0 recommendation scoring engine.
 
 Scores systems for fortify urgency and expansion attractiveness based on
 real Power Play metrics from the Spansh dump:
 
   - Reinforcement: commodity deliveries supporting the system
-  - Undermining: enemy deliveries attacking the system
-  - Power State: Fortified | Undermined | Turmoil | Expansion | Contested | HomeSystem | InPrepareRadius
+  - Undermining:   enemy deliveries attacking the system
+  - Power State:   Stronghold | Fortified | Exploited | Turmoil | Undermined |
+                   Contested | Expansion | InPrepareRadius | Prepared | HomeSystem
   - Undermine ratio: undermining / reinforcement — higher = more threatened
+
+PP 2.0 state semantics:
+  Stronghold    — maximum defense (high reinforcement cap); skip fortify (already excellent)
+  Fortified     — above reinforcement threshold; healthy but can improve
+  Exploited     — base controlled state, no special reinforcement; monitor ratio
+  Turmoil       — critical: system will be lost if not rescued
+  Undermined    — actively being undermined, not yet in Turmoil
+  Contested     — multiple powers fighting for control
+  Expansion     — power expanding into this system
+  InPrepareRadius — in range of a prepare-phase system
+  Prepared      — system prepared; actively becoming expansion target
+  HomeSystem    — power capital; should never need fortify
 
 Weights are loaded from the admin_settings table with hard-coded defaults.
 """
@@ -27,30 +40,42 @@ from models.schemas import RecommendationItem
 # ---------------------------------------------------------------------------
 
 DEFAULTS: dict[str, float] = {
-    # Fortify weights
-    "fortify_turmoil":          60.0,   # system is in Turmoil (will be lost)
-    "fortify_undermined":       50.0,   # system is Undermined
-    "fortify_high_ratio":       40.0,   # undermine ratio > 0.5
-    "fortify_trend_worsening":  20.0,   # undermine ratio rising across snapshots
-    "fortify_near_center":      10.0,   # within 15 LY of center system
-    "fortify_contested":        30.0,   # system is Contested
-    # Expand weights
-    "expand_in_prepare":        50.0,   # InPrepareRadius state
-    "expand_expansion_state":   40.0,   # Expansion state
-    "expand_proximity":         20.0,   # within 20 LY of a power-controlled system
-    "expand_no_controller":     30.0,   # no power currently controls the system
-    "expand_allegiance_match":  15.0,   # system allegiance matches the power
+    # ── Fortify weights ──────────────────────────────────────────────────────
+    "fortify_turmoil":           70.0,   # system in Turmoil — will be lost very soon
+    "fortify_undermined":        55.0,   # system is Undermined (not yet Turmoil)
+    "fortify_contested":         35.0,   # system is Contested by another power
+    "fortify_exploited_ratio":   30.0,   # Exploited system with high undermine ratio
+    "fortify_high_ratio":        40.0,   # undermine ratio > 0.5 (any state)
+    "fortify_trend_worsening":   20.0,   # undermine ratio rising across snapshots
+    "fortify_near_center":       10.0,   # within 15 LY of the center system
+    # Stronghold systems are already maximally defended — no fortify bonus
+    # (we actively suppress them from fortify list via the engine)
+
+    # ── Expand weights ───────────────────────────────────────────────────────
+    "expand_prepared":           60.0,   # Prepared state — actively becoming expansion target
+    "expand_in_prepare":         50.0,   # InPrepareRadius — prime expansion target
+    "expand_expansion_state":    40.0,   # Expansion state — actively expanding
+    "expand_no_controller":      30.0,   # no power currently controls the system
+    "expand_proximity":          20.0,   # within 20 LY of a power-controlled system
+    "expand_allegiance_match":   15.0,   # system allegiance matches the power
 }
 
-# Map powers to their typical allegiance (for expand allegiance bonus)
+# Map powers to their typical allegiance (for expand allegiance bonus).
+# Includes all PP 2.0 powers as of 2024-2025.
 POWER_ALLEGIANCE: dict[str, str] = {
+    # Empire
     "Arissa Lavigny-Duval": "Empire",
     "Aisling Duval":        "Empire",
     "Zemina Torval":        "Empire",
     "Denton Patreus":       "Empire",
+    # Federation
     "Zachary Hudson":       "Federation",
     "Felicia Winters":      "Federation",
+    "Jerome Archer":        "Federation",
+    # Alliance
     "Edmund Mahon":         "Alliance",
+    "Nakato Kaine":         "Alliance",
+    # Independent
     "Pranav Antal":         "Independent",
     "Li Yong-Rui":          "Independent",
     "Archon Delaine":       "Independent",
@@ -153,17 +178,26 @@ def compute_fortify_scores(
         score = 0.0
         reasons: list[str] = []
 
+        # Stronghold systems are already maximally defended — skip them entirely
+        # so commanders focus effort where it's actually needed.
+        if power_state == "Stronghold":
+            continue
+
         if power_state == "Turmoil":
             score += weights["fortify_turmoil"]
-            reasons.append("System is in Turmoil — at risk of being lost")
+            reasons.append("System in Turmoil — at risk of being lost!")
 
-        if power_state == "Undermined":
+        elif power_state == "Undermined":
             score += weights["fortify_undermined"]
             reasons.append("System is Undermined")
 
-        if power_state == "Contested":
+        elif power_state == "Contested":
             score += weights["fortify_contested"]
-            reasons.append("System is Contested")
+            reasons.append("System is Contested by another power")
+
+        elif power_state == "Exploited" and undermine_ratio is not None and undermine_ratio > 0.3:
+            score += weights["fortify_exploited_ratio"]
+            reasons.append(f"Exploited system under undermining pressure ({undermine_ratio:.0%})")
 
         if undermine_ratio is not None and undermine_ratio > 0.5:
             score += weights["fortify_high_ratio"]
@@ -256,11 +290,15 @@ def compute_expand_scores(
         score = 0.0
         reasons: list[str] = []
 
-        if power_state == "InPrepareRadius":
+        if power_state == "Prepared":
+            score += weights["expand_prepared"]
+            reasons.append("System is Prepared — becoming expansion target")
+
+        elif power_state == "InPrepareRadius":
             score += weights["expand_in_prepare"]
             reasons.append("System is in prepare radius — prime expansion target")
 
-        if power_state == "Expansion":
+        elif power_state == "Expansion":
             score += weights["expand_expansion_state"]
             reasons.append("System is actively in Expansion state")
 

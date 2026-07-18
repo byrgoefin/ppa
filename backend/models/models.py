@@ -1,8 +1,12 @@
 """SQLAlchemy ORM models for the Elite Dangerous Power Play Analyzer.
 
-Data is sourced from the Spansh Power Play dump (powerplay.json.gz) which
-contains one entry per system that is currently under a Power's influence.
+Data is sourced from the Spansh populated systems dump (systems_populated.json.gz)
+which contains one entry per system that is currently under a Power's influence.
 Each sync run inserts a fresh snapshot row so historical trends accumulate.
+
+PP 2.0 states stored in pp_system_snapshots.power_state:
+  Stronghold | Fortified | Exploited | Turmoil | Undermined |
+  Contested  | Expansion | InPrepareRadius | Prepared | HomeSystem
 """
 
 from datetime import datetime
