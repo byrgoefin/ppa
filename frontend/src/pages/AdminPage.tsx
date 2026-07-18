@@ -275,30 +275,64 @@ export default function AdminPage({ onClose }: Props) {
 
       {/* Scoring Weights */}
       <div style={cardStyle}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
           <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>Scoring Weights</h3>
           <button onClick={saveSettings} style={{ padding: "6px 16px", fontSize: 13, background: "#4AD94A", color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", fontWeight: 600 }}>
-            {settingsSaved ? "Saved!" : "Save Weights"}
+            {settingsSaved ? "✓ Saved!" : "Save Weights"}
           </button>
         </div>
-        <p style={{ fontSize: 12, color: "#57606a", margin: "0 0 16px" }}>Adjust the point values for each scoring rule. Higher values make that condition more influential in the recommendation ranking.</p>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 32px" }}>
-          {Object.keys(DEFAULT_WEIGHTS).map((key) => (
-            <div key={key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <label style={{ fontSize: 13, flex: 1, color: "#1f2328" }}>{WEIGHT_LABELS[key] ?? key}</label>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="range" min={0} max={100} step={5}
-                  value={settings[key] ?? DEFAULT_WEIGHTS[key]}
-                  onChange={(e) => setSettings((prev) => ({ ...prev, [key]: Number(e.target.value) }))}
-                  style={{ width: 100 }}
-                />
-                <span style={{ fontSize: 13, fontWeight: 600, width: 28, textAlign: "right", color: "#3b82d4" }}>
-                  {settings[key] ?? DEFAULT_WEIGHTS[key]}
-                </span>
+        <p style={{ fontSize: 12, color: "#57606a", margin: "0 0 16px" }}>
+          Adjust point values for each scoring rule. Use the slider for quick adjustments or type a value directly.
+          Higher values make that condition more influential in recommendation ranking.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px 40px" }}>
+          {Object.keys(DEFAULT_WEIGHTS).map((key) => {
+            const val = settings[key] ?? DEFAULT_WEIGHTS[key];
+            const def = DEFAULT_WEIGHTS[key];
+            const changed = val !== def;
+            return (
+              <div key={key}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <label style={{ fontSize: 12, color: changed ? "#1f2328" : "#57606a", fontWeight: changed ? 600 : 400 }}>
+                    {WEIGHT_LABELS[key] ?? key}
+                  </label>
+                  {changed && (
+                    <button
+                      onClick={() => setSettings((prev) => ({ ...prev, [key]: def }))}
+                      title={`Reset to default (${def})`}
+                      style={{ fontSize: 10, color: "#57606a", background: "none", border: "1px solid #e5e7eb", borderRadius: 3, padding: "1px 5px", cursor: "pointer" }}
+                    >
+                      reset
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    type="range" min={0} max={200} step={1}
+                    value={val}
+                    onChange={(e) => setSettings((prev) => ({ ...prev, [key]: Number(e.target.value) }))}
+                    style={{ flex: 1, accentColor: changed ? "#3b82d4" : "#ccc" }}
+                  />
+                  <input
+                    type="number" min={0} max={9999} step={1}
+                    value={val}
+                    onChange={(e) => {
+                      const n = parseFloat(e.target.value);
+                      if (!isNaN(n) && n >= 0) setSettings((prev) => ({ ...prev, [key]: n }));
+                    }}
+                    style={{
+                      width: 62, padding: "4px 6px", fontSize: 13, fontWeight: 600,
+                      border: `1px solid ${changed ? "#3b82d4" : "#e5e7eb"}`,
+                      borderRadius: 5, textAlign: "right",
+                      color: changed ? "#3b82d4" : "#57606a",
+                      outline: "none",
+                    }}
+                  />
+                </div>
+                <div style={{ fontSize: 10, color: "#bbb", marginTop: 1 }}>default: {def}</div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

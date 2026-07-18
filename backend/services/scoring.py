@@ -295,17 +295,21 @@ def _fortify_urgency(
 
     Returns (score, reasons, days_to_failure).
 
-    days_to_failure = buffer_merits / abs(U - R)
-      where buffer_merits = progress × band_width (absolute merits above downgrade).
+    KEY RULE: urgency is ONLY triggered when undermining > reinforcement (net < 0).
+      A system with R >= U has no threat regardless of how low progress is.
+      Low progress + no undermining = normal state, no action needed.
 
-    Urgency bands (calibrated to merit-based days):
-      CRITICAL  (1000) : progress ≤ 0 — downgrade happening NOW
-      URGENT    ( 800) : < 7 days  (less than one full cycle)
-      WARNING   ( 600) : < 21 days (less than three cycles)
-      MONITOR   ( 300) : net negative but > 21 days
+    days_to_failure = buffer_merits / (U - R)   [only computed when U > R]
+      where buffer_merits = progress × band_width
+
+    Urgency bands:
+      CRITICAL  (1000) : progress ≤ 0          — downgrade happening NOW
+      URGENT    ( 800) : days < 7              — less than one full cycle
+      WARNING   ( 600) : days < 21             — less than three cycles
+      MONITOR   ( 300) : net negative, days ≥ 21
       UPGRADE   ( 150) : net positive, within 20% of upgrade threshold
         0              : healthy, no action needed
-       -1              : skip (healthy Stronghold)
+       -1              : skip (Stronghold with no threat, or already maxed)
     """
     r   = reinforcement or 0
     u   = undermining   or 0
@@ -319,42 +323,72 @@ def _fortify_urgency(
     # Pre-compute absolute merit context for inclusion in reasons
     mf = _merit_fields(power_state, p)
 
-    # ── 1. Stronghold: already at max defense ──────────────────────────────
+    # ── 1. Stronghold ──────────────────────────────────────────────────────
+    # Stronghold is the highest state — only flag if ACTIVELY being undermined.
+    # Low progress alone is NOT a threat if nobody is undermining.
     if power_state == "Stronghold":
-        if p <= 0.0:
+        if p <= 0.0 and u > r:
+            # Actively failing AND being undermined
             score = SCORE_FAILING_NOW
             reasons.append("⚠ Stronghold FAILING — reinforcement urgently needed!")
             reasons.append(f"Merit position: {mf['merit_position']:,} (below {MERIT_STRONGHOLD:,} threshold)")
             days_to_failure = 0.0
             return score, reasons, days_to_failure
-        elif p < 0.10:
-            score = SCORE_URGENT
-            days_to_failure = _estimate_days(p, power_state, r, u)
-            d_str = f"~{days_to_failure:.1f}d" if days_to_failure is not None else "unknown"
-            reasons.append(f"Stronghold at risk of dropping to Fortified (progress {p:.1%}, {d_str})")
+        elif p <= 0.0:
+            # Progress exhausted but no active undermining — watch only
+            score = SCORE_MONITOR
+            reasons.append(f"Stronghold progress at {p:.1%} — no active undermining but buffer exhausted")
             reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Need {mf['merits_to_safety']:,} to reach safety")
             return score, reasons, days_to_failure
-        return -1.0, [], None   # healthy Stronghold — skip
+        elif u > r:
+            # Being undermined — compute days using buffer/net formula
+            days_to_failure = _estimate_days(p, power_state, r, u)
+            if days_to_failure is not None and days_to_failure < 7.0:
+                score = SCORE_URGENT
+                reasons.append(f"⚠ Stronghold under active attack — ~{days_to_failure:.1f}d to drop to Fortified")
+            elif days_to_failure is not None and days_to_failure < 21.0:
+                score = SCORE_WARNING
+                reasons.append(f"⚠ Stronghold being undermined — ~{days_to_failure:.1f}d to drop to Fortified")
+            else:
+                score = SCORE_MONITOR
+                d_str = f"~{days_to_failure:.0f}d" if days_to_failure is not None else "unknown"
+                reasons.append(f"Stronghold under minor pressure ({d_str} at current rate)")
+            reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Net: {net:+,}/day · Need {mf['merits_to_safety']:,} to safety")
+            return score, reasons, days_to_failure
+        else:
+            # Stronghold, healthy, no threat — skip entirely
+            return -1.0, [], None
 
     # ── 2. Failing now (progress ≤ 0) ─────────────────────────────────────
     if p <= 0.0:
+        if u <= r:
+            # Progress is at zero but not being actively undermined — monitor only
+            score = SCORE_MONITOR
+            state_desc = {
+                "Exploited": "at Unoccupied boundary",
+                "Fortified": "at Exploited boundary",
+            }.get(power_state or "", "at downgrade boundary")
+            reasons.append(f"Progress at {p:.1%} ({state_desc}) — no active undermining")
+            reasons.append(f"Buffer: {mf['buffer_merits']:,} merits — reinforce to rebuild cushion")
+            return score, reasons, days_to_failure
+        # Actively failing with U > R
         score = SCORE_FAILING_NOW
         days_to_failure = 0.0
         state_desc = {
-            "Exploited":  "losing this system to Unoccupied",
-            "Fortified":  "dropping to Exploited",
+            "Exploited": "losing this system to Unoccupied",
+            "Fortified": "dropping to Exploited",
         }.get(power_state or "", "losing current state")
         reasons.append(f"🚨 CRITICAL: {state_desc} — progress at {p:.1%}")
-        if u > r:
-            reasons.append(f"Undermining exceeds reinforcement by {u - r:,} this cycle")
+        reasons.append(f"Undermining exceeds reinforcement by {u - r:,} this cycle")
         reasons.append(f"Need {mf['merits_to_safety']:,} merits to reach safety · {mf['merits_to_upgrade']:,} to upgrade")
         return score, reasons, days_to_failure
 
-    # ── 3. Estimate days to failure: buffer_merits / abs(U - R) ───────────
+    # ── 3. Estimate days to failure: buffer / (U - R) ─────────────────────
+    # _estimate_days returns None when R >= U — system is not threatened
     days_to_failure = _estimate_days(p, power_state, r, u)
 
     if days_to_failure is not None and days_to_failure < 7.0:
-        # Less than one full PP cycle — urgent
+        # U > R AND buffer runs out in < 1 cycle — urgent
         score = SCORE_URGENT
         reasons.append(
             f"⚠ URGENT: ~{days_to_failure:.1f} day{'s' if days_to_failure >= 1 else ''} "
@@ -362,25 +396,25 @@ def _fortify_urgency(
         )
         reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Net: {net:+,}/day · Need {mf['merits_to_safety']:,} to reach safety")
     elif days_to_failure is not None and days_to_failure < 21.0:
-        # Less than three cycles — warning
+        # U > R AND buffer runs out in < 3 cycles — warning
         score = SCORE_WARNING
         reasons.append(
             f"⚠ WARNING: ~{days_to_failure:.1f} days to state downgrade at current rate"
         )
         reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Net: {net:+,}/day · Need {mf['merits_to_safety']:,} to reach safety")
-    elif net < 0:
-        # Net negative but buffer is large — still worth monitoring
+    elif days_to_failure is not None:
+        # U > R but large buffer — monitor
         score = SCORE_MONITOR
-        d_str = f"~{days_to_failure:.0f}d" if days_to_failure is not None else "unknown"
         reasons.append(
-            f"Net negative (U={u:,} R={r:,} net={net:+,}/day) — {d_str} at current rate"
+            f"Under pressure (U={u:,} R={r:,} net={net:+,}/day) — ~{days_to_failure:.0f}d at current rate"
         )
         reasons.append(f"Buffer: {mf['buffer_merits']:,} merits · Need {mf['merits_to_safety']:,} to reach safety")
     else:
+        # days_to_failure is None → R >= U → no active threat
         # ── 4. Healthy — check if close to upgrade threshold ──────────────
         remaining_to_upgrade = 1.0 - p
         if remaining_to_upgrade <= 0.0:
-            return -1.0, [], None
+            return -1.0, [], None   # already past upgrade threshold
         elif remaining_to_upgrade <= 0.20:
             score = SCORE_UPGRADE_CLOSE
             reasons.append(
@@ -391,12 +425,11 @@ def _fortify_urgency(
         elif remaining_to_upgrade <= 0.40:
             score = SCORE_NEAR_UPGRADE
             reasons.append(
-                f"Approaching {_next_state(power_state)} threshold "
-                f"({p:.1%} / 100%)"
+                f"Approaching {_next_state(power_state)} threshold ({p:.1%} / 100%)"
             )
             reasons.append(f"{mf['merits_to_upgrade']:,} merits needed to upgrade")
         else:
-            return 0.0, [], None
+            return 0.0, [], None   # healthy, no action needed
 
     # ── 5. Trend modifier ─────────────────────────────────────────────────
     if trend == "worsening" and score > 0:
