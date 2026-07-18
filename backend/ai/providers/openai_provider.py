@@ -60,7 +60,7 @@ class OpenAIProvider(AIProvider):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            max_tokens=self.max_tokens,
+            max_completion_tokens=self.max_tokens,
             temperature=0.3,
         )
         return response.choices[0].message.content.strip()

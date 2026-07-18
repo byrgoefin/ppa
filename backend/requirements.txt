@@ -36,5 +36,5 @@ ijson>=3.3.0
 # Task scheduling
 apscheduler>=3.10.4
 
-# OpenAI / LLM integration
-openai>=1.50.0
+# OpenAI / LLM integration — pin to 1.x; 2.x has breaking API changes
+openai>=1.50.0,<2.0.0
