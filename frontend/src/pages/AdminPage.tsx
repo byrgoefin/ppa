@@ -48,33 +48,27 @@ async function apiPatch(path: string, body: unknown) {
 }
 
 // ── Default scoring weights (must match backend services/scoring.py DEFAULTS) ──
-// PP 2.0 actual states: Exploited | Fortified | Stronghold | Unoccupied
+// Urgency scoring is automatic (progress/days-to-failure) — these weights tune bonuses
 const DEFAULT_WEIGHTS: Record<string, number> = {
   // Fortify
-  fortify_exploited_ratio:   40,
-  fortify_fortified_ratio:   30,
-  fortify_high_ratio:        50,
-  fortify_trend_worsening:   25,
-  fortify_near_center:       10,
+  fortify_weight:          1,    // Global fortify score multiplier (1 = no change)
+  fortify_near_center:    15,    // Bonus for systems near center (<15 LY)
   // Expand
-  expand_unoccupied:         55,
-  expand_no_controller:      40,
-  expand_proximity:          25,
-  expand_allegiance_match:   15,
+  expand_unoccupied:      60,    // Base score for Unoccupied system
+  expand_high_progress:   30,    // Bonus if PP activity > 50%
+  expand_proximity:       25,    // Bonus for systems close to controlled space (<20 LY)
+  expand_allegiance_match:15,    // Bonus if allegiance matches power
 };
 
 const WEIGHT_LABELS: Record<string, string> = {
   // Fortify
-  fortify_exploited_ratio:   "Fortify — Exploited system with undermining pressure (>30%)",
-  fortify_fortified_ratio:   "Fortify — Fortified system still being undermined (>30%)",
-  fortify_high_ratio:        "Fortify — High undermine ratio (>60%, any non-Stronghold)",
-  fortify_trend_worsening:   "Fortify — Undermining pressure is increasing",
-  fortify_near_center:       "Fortify — Near center system (<15 LY)",
+  fortify_weight:          "Fortify — Global urgency score multiplier",
+  fortify_near_center:     "Fortify — Bonus: near center system (<15 LY)",
   // Expand
-  expand_unoccupied:         "Expand — System is Unoccupied (no controller, in PP bubble)",
-  expand_no_controller:      "Expand — No controlling power on this system",
-  expand_proximity:          "Expand — Close to a controlled system (<20 LY)",
-  expand_allegiance_match:   "Expand — System allegiance matches power",
+  expand_unoccupied:       "Expand — Base score for Unoccupied system",
+  expand_high_progress:    "Expand — Bonus: high PP activity in system (>50%)",
+  expand_proximity:        "Expand — Bonus: close to controlled system (<20 LY)",
+  expand_allegiance_match: "Expand — Bonus: allegiance matches power",
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────

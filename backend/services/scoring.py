@@ -1,32 +1,58 @@
 """Power Play 2.0 recommendation scoring engine.
 
-Scores systems for fortify urgency and expansion attractiveness based on
-real Power Play metrics from the Spansh dump:
+═══════════════════════════════════════════════════════════════
+PP 2.0 MECHANICS (confirmed from live Spansh API data, July 2026)
+═══════════════════════════════════════════════════════════════
 
-  - Reinforcement: commodity deliveries supporting the system
-  - Undermining:   enemy deliveries attacking the system
-  - Power State:   Stronghold | Fortified | Exploited | Turmoil | Undermined |
-                   Contested | Expansion | InPrepareRadius | Prepared | HomeSystem
-  - Undermine ratio: undermining / reinforcement — higher = more threatened
+Actual states in the wild:   Exploited | Fortified | Stronghold | Unoccupied
+Fields per system:
+  power_state_reinforcement   (int)   — total reinforcement delivered this cycle
+  power_state_undermining     (int)   — total undermining delivered this cycle
+  power_state_control_progress (float) — normalized net score:
+      < 0.0  → system is ALREADY past the downgrade threshold (losing NOW)
+      0.0–1.0 → between thresholds (normal operational range)
+      ≥ 1.0  → upgrade threshold crossed (next level imminent / already counted)
 
-PP 2.0 state semantics:
-  Stronghold    — maximum defense (high reinforcement cap); skip fortify (already excellent)
-  Fortified     — above reinforcement threshold; healthy but can improve
-  Exploited     — base controlled state, no special reinforcement; monitor ratio
-  Turmoil       — critical: system will be lost if not rescued
-  Undermined    — actively being undermined, not yet in Turmoil
-  Contested     — multiple powers fighting for control
-  Expansion     — power expanding into this system
-  InPrepareRadius — in range of a prepare-phase system
-  Prepared      — system prepared; actively becoming expansion target
-  HomeSystem    — power capital; should never need fortify
+The PP cycle resets weekly.  Within a cycle:
+  - Each tick the game re-computes control_progress from R and U deliveries.
+  - progress ≈ (net deliveries) / (threshold to next level)
+  - A negative progress means U has overcome R past the downgrade boundary.
 
-Weights are loaded from the admin_settings table with hard-coded defaults.
+STATE TRANSITIONS (direction and what stops them):
+  Exploited  → degrades to Unoccupied if progress reaches 0.0
+  Fortified  → degrades to Exploited  if progress reaches 0.0
+  Stronghold → degrades to Fortified  if progress reaches 0.0
+  Exploited  → upgrades to Fortified  if progress reaches 1.0
+  Fortified  → upgrades to Stronghold if progress reaches 1.0
+  (Stronghold has no upgrade)
+
+URGENCY MODEL used by this engine:
+  days_to_failure = progress / daily_undermine_rate
+      where daily_undermine_rate = net_daily_deficit / progress_scale
+  Because we don't have historical ticks, we estimate daily rate from:
+      estimated_daily_net = (undermining - reinforcement) / 7
+          (assuming current snapshot represents ~1 week of activity)
+  Then: days_to_failure = progress / (daily_deficit / progress_scale)
+      = progress * 7 / max(0, undermining - reinforcement)
+  A system with progress < 0 is ALREADY failing — days_to_failure = 0.
+
+FORTIFY PRIORITY ORDER:
+  1. progress ≤ 0   → CRITICAL — downgrade happening NOW (score = 1000 base)
+  2. days_to_failure < 2 → URGENT — will fail within 2 days
+  3. days_to_failure < 5 → WARNING — will fail within 5 days
+  4. progress close to 1.0 and net positive → PROMOTE SOON (fortify bonus for upgrade)
+  5. progress ≥ 1.0 AND state already Stronghold → SKIP (no action needed)
+
+EXPAND PRIORITY ORDER:
+  1. Unoccupied systems close to our controlled territory
+  2. Higher control_progress Unoccupied = more "primed" for takeover
+  3. Allegiance match = easier to flip
 """
 
 from __future__ import annotations
 
 import math
+import logging
 from typing import Optional
 
 from sqlalchemy import text
@@ -35,52 +61,64 @@ from sqlalchemy.orm import Session
 from models.models import AdminSetting, PPSystem, PPSystemSnapshot
 from models.schemas import RecommendationItem
 
-# ---------------------------------------------------------------------------
-# Default scoring weights
-# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scoring weights  (all adjustable via Admin panel → admin_settings table)
+# ──────────────────────────────────────────────────────────────────────────────
 
 DEFAULTS: dict[str, float] = {
-    # ── Fortify weights ──────────────────────────────────────────────────────
-    # Actual PP 2.0 states from Spansh: Exploited | Fortified | Stronghold | Unoccupied
-    "fortify_exploited_ratio":   40.0,   # Exploited system undermining ratio > 0.3
-    "fortify_fortified_ratio":   30.0,   # Fortified system still being undermined (ratio > 0.3)
-    "fortify_high_ratio":        50.0,   # undermine ratio > 0.6 (any non-Stronghold state)
-    "fortify_trend_worsening":   25.0,   # undermine ratio rising across snapshots
-    "fortify_near_center":       10.0,   # within 15 LY of the center system
-    # Stronghold = already max defense, skip entirely
+    # ── Fortify ──────────────────────────────────────────────────────────────
+    # Urgency score = base * weight  (base is 0–1000 from the urgency model)
+    "fortify_weight":             1.0,    # global fortify multiplier
+    "fortify_near_center":        15.0,   # bonus if within 15 LY of center system
 
-    # ── Expand weights ───────────────────────────────────────────────────────
-    "expand_unoccupied":         55.0,   # Unoccupied system in PP bubble — prime target
-    "expand_no_controller":      40.0,   # no controlling_power yet
-    "expand_proximity":          25.0,   # within 20 LY of a power-controlled system
-    "expand_allegiance_match":   15.0,   # system allegiance matches the power
+    # ── Expand ───────────────────────────────────────────────────────────────
+    "expand_unoccupied":          60.0,   # base score for Unoccupied system
+    "expand_high_progress":       30.0,   # bonus if progress > 0.5 (primed)
+    "expand_proximity":           25.0,   # within 20 LY of a controlled system
+    "expand_allegiance_match":    15.0,   # allegiance matches power
 }
 
-# Map powers to their typical allegiance (for expand allegiance bonus).
-# Uses the abbreviated names as returned by Spansh API (confirmed July 2026).
+# ──────────────────────────────────────────────────────────────────────────────
+# Power allegiance map  (Spansh abbreviated names, confirmed July 2026)
+# ──────────────────────────────────────────────────────────────────────────────
+
 POWER_ALLEGIANCE: dict[str, str] = {
-    # Empire
-    "A. Lavigny-Duval": "Empire",      # Arissa Lavigny-Duval (Spansh abbreviates)
+    "A. Lavigny-Duval": "Empire",
     "Aisling Duval":    "Empire",
     "Zemina Torval":    "Empire",
     "Denton Patreus":   "Empire",
-    # Federation
     "Felicia Winters":  "Federation",
     "Jerome Archer":    "Federation",
-    # Alliance
     "Edmund Mahon":     "Alliance",
     "Nakato Kaine":     "Alliance",
-    # Independent
     "Pranav Antal":     "Independent",
     "Li Yong-Rui":      "Independent",
     "Archon Delaine":   "Independent",
     "Yuri Grom":        "Independent",
 }
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Urgency model constants
+# ──────────────────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# PP cycle length in days (weekly reset)
+CYCLE_DAYS = 7.0
+
+# Score bands — used so the urgency score is human-readable (0–1000 range)
+# rather than a raw 0–1 float.
+SCORE_FAILING_NOW    = 1000.0   # progress ≤ 0 — state change happening this cycle
+SCORE_URGENT         = 800.0    # < 2 days to failure
+SCORE_WARNING        = 600.0    # < 5 days to failure
+SCORE_MONITOR        = 300.0    # < full cycle, net negative
+SCORE_UPGRADE_CLOSE  = 150.0    # within 20% of upgrade threshold (reinforce bonus)
+SCORE_NEAR_UPGRADE   = 80.0     # between 20-40% of upgrade threshold
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DB helpers
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def load_weights(db: Session) -> dict[str, float]:
@@ -101,53 +139,225 @@ def _dist(ax: float, ay: float, az: float, bx: float, by: float, bz: float) -> f
 
 def get_latest_snapshots(db: Session) -> dict[int, dict]:
     """Return latest PP snapshot per pp_systems.id using DISTINCT ON."""
-    sql = text("""
+    rows = db.execute(text("""
         SELECT DISTINCT ON (system_id)
                system_id, power, power_state,
                reinforcement, undermining, control_progress, snapshot_time
         FROM pp_system_snapshots
         ORDER BY system_id, snapshot_time DESC
-    """)
-    rows = db.execute(sql).mappings().all()
-    return {
-        row["system_id"]: dict(row)
-        for row in rows
-    }
+    """)).mappings().all()
+    return {row["system_id"]: dict(row) for row in rows}
 
 
-def get_undermine_trend(system_id: int, db: Session) -> str:
-    """Compare the last 3 undermine ratios for a system.
+def get_progress_trend(system_id: int, db: Session) -> tuple[str, Optional[float]]:
+    """Return (trend_label, daily_net_change) from the last 3 snapshots.
 
-    Returns 'worsening', 'improving', 'stable', or 'unknown'.
+    trend_label: 'worsening' | 'improving' | 'stable' | 'unknown'
+    daily_net_change: estimated change in control_progress per day
+                      (negative = losing ground, positive = gaining)
     """
-    rows = db.execute(
-        text("""
-            SELECT reinforcement, undermining
-            FROM pp_system_snapshots
-            WHERE system_id = :sid
-              AND reinforcement IS NOT NULL
-              AND undermining   IS NOT NULL
-              AND reinforcement > 0
-            ORDER BY snapshot_time DESC
-            LIMIT 3
-        """),
-        {"sid": system_id},
-    ).all()
+    rows = db.execute(text("""
+        SELECT control_progress, snapshot_time
+        FROM pp_system_snapshots
+        WHERE system_id = :sid
+          AND control_progress IS NOT NULL
+        ORDER BY snapshot_time DESC
+        LIMIT 3
+    """), {"sid": system_id}).all()
 
     if len(rows) < 2:
-        return "unknown"
+        return "unknown", None
 
-    ratios = [r.undermining / r.reinforcement for r in rows]  # newest first
-    if all(ratios[i] > ratios[i + 1] for i in range(len(ratios) - 1)):
-        return "worsening"
-    if all(ratios[i] < ratios[i + 1] for i in range(len(ratios) - 1)):
-        return "improving"
-    return "stable"
+    # Compute per-day change between consecutive snapshots
+    deltas: list[float] = []
+    for i in range(len(rows) - 1):
+        t_new = rows[i].snapshot_time
+        t_old = rows[i + 1].snapshot_time
+        p_new = rows[i].control_progress
+        p_old = rows[i + 1].control_progress
+        if t_new and t_old and t_new != t_old:
+            days = max((t_new - t_old).total_seconds() / 86400.0, 0.01)
+            deltas.append((p_new - p_old) / days)
+
+    if not deltas:
+        return "unknown", None
+
+    avg_daily = sum(deltas) / len(deltas)
+
+    if len(rows) >= 2:
+        # Most recent direction
+        p_newest = rows[0].control_progress
+        p_prev   = rows[1].control_progress
+        if p_newest < p_prev - 0.01:
+            trend = "worsening"
+        elif p_newest > p_prev + 0.01:
+            trend = "improving"
+        else:
+            trend = "stable"
+    else:
+        trend = "stable"
+
+    return trend, avg_daily
 
 
-# ---------------------------------------------------------------------------
-# Fortify scoring
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Core urgency calculation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _fortify_urgency(
+    power_state: Optional[str],
+    reinforcement: Optional[int],
+    undermining: Optional[int],
+    control_progress: Optional[float],
+    trend: str,
+    daily_delta: Optional[float],
+) -> tuple[float, list[str], Optional[float]]:
+    """Compute a fortify urgency score (0–1000+), reasons, and days_to_failure.
+
+    Returns (score, reasons, days_to_failure).
+
+    Score semantics:
+      1000  = failing right now (progress ≤ 0)
+      800+  = < 2 days to failure
+      600+  = < 5 days to failure
+      300+  = net negative, at risk this cycle
+      150+  = healthy but close to upgrade threshold (reinforce bonus)
+        0   = healthy, no action needed
+      -1    = skip entirely (Stronghold, already maxed)
+    """
+    r   = reinforcement or 0
+    u   = undermining   or 0
+    p   = control_progress if control_progress is not None else 0.5
+    net = r - u   # positive = reinforcement winning, negative = undermining winning
+
+    score:   float      = 0.0
+    reasons: list[str]  = []
+    days_to_failure: Optional[float] = None
+
+    # ── 1. Stronghold: already at max defense ──────────────────────────────
+    if power_state == "Stronghold":
+        # Only flag if in serious danger (progress very low) — unusual but possible
+        if p <= 0.0:
+            score = SCORE_FAILING_NOW
+            reasons.append("⚠ Stronghold FAILING — reinforcement urgently needed!")
+            days_to_failure = 0.0
+            return score, reasons, days_to_failure
+        elif p < 0.05:
+            score = SCORE_URGENT
+            reasons.append(f"Stronghold at risk of dropping to Fortified (progress {p:.1%})")
+            days_to_failure = _estimate_days(p, net, r)
+            return score, reasons, days_to_failure
+        return -1.0, [], None   # healthy Stronghold — skip
+
+    # ── 2. Failing now (progress ≤ 0) ─────────────────────────────────────
+    if p <= 0.0:
+        score = SCORE_FAILING_NOW
+        days_to_failure = 0.0
+        state_desc = {
+            "Exploited":  "losing this system to Unoccupied",
+            "Fortified":  "dropping to Exploited",
+        }.get(power_state or "", "losing current state")
+        reasons.append(f"🚨 CRITICAL: {state_desc} — progress at {p:.1%}")
+        if u > r:
+            reasons.append(f"Undermining exceeds reinforcement by {u - r:,} this cycle")
+        return score, reasons, days_to_failure
+
+    # ── 3. Estimate days to failure based on net rate ──────────────────────
+    days_to_failure = _estimate_days(p, net, r)
+
+    if days_to_failure is not None and days_to_failure < 2.0:
+        score = SCORE_URGENT
+        reasons.append(
+            f"⚠ URGENT: ~{days_to_failure:.1f} day{'s' if days_to_failure >= 1 else ''} "
+            f"to state downgrade (progress {p:.1%})"
+        )
+    elif days_to_failure is not None and days_to_failure < 5.0:
+        score = SCORE_WARNING
+        reasons.append(
+            f"⚠ WARNING: ~{days_to_failure:.1f} days to state downgrade "
+            f"(progress {p:.1%})"
+        )
+    elif net < 0:
+        # Net negative but not imminent — still worth monitoring
+        score = SCORE_MONITOR
+        reasons.append(
+            f"Net negative this cycle (U={u:,} R={r:,} net={net:+,}) "
+            f"— progress {p:.1%}"
+        )
+    else:
+        # ── 4. Healthy — check if close to upgrade threshold ──────────────
+        remaining_to_upgrade = 1.0 - p
+        if remaining_to_upgrade <= 0.0:
+            # Already past upgrade threshold — suppress (will upgrade naturally)
+            return -1.0, [], None
+        elif remaining_to_upgrade <= 0.20:
+            score = SCORE_UPGRADE_CLOSE
+            reasons.append(
+                f"Nearly at {_next_state(power_state)} threshold "
+                f"({p:.1%} / 100%) — push it over!"
+            )
+        elif remaining_to_upgrade <= 0.40:
+            score = SCORE_NEAR_UPGRADE
+            reasons.append(
+                f"Approaching {_next_state(power_state)} threshold "
+                f"({p:.1%} / 100%)"
+            )
+        else:
+            # Healthy, no action needed
+            return 0.0, [], None
+
+    # ── 5. Trend modifier ─────────────────────────────────────────────────
+    if trend == "worsening" and score > 0:
+        score *= 1.20
+        reasons.append("Trend: situation is getting worse over time")
+    elif trend == "improving" and score < SCORE_URGENT:
+        score *= 0.80
+        reasons.append("Trend: situation is improving")
+
+    return score, reasons, days_to_failure
+
+
+def _estimate_days(
+    progress: float,
+    net_rein_minus_und: int,
+    reinforcement: int,
+) -> Optional[float]:
+    """Estimate days until progress reaches 0.0 given the current net rate.
+
+    We assume the data represents one full weekly cycle, so the daily rate
+    is net_per_cycle / 7.  progress is normalised to [0,1] per cycle.
+
+    Returns None if the system is net-positive (not failing).
+    Returns 0.0 if already at or past the threshold.
+    """
+    if progress <= 0.0:
+        return 0.0
+    if net_rein_minus_und >= 0:
+        return None   # reinforcement is winning — no failure imminent
+
+    deficit_per_cycle = abs(net_rein_minus_und)   # how much U > R this cycle
+    # Normalise: how much progress is lost per day at this rate?
+    # We don't know the absolute threshold, but we can estimate:
+    # if current progress is p and it took (deficit / threshold) to get here,
+    # then days_remaining = p * cycle_days / (deficit / total_capacity)
+    # Without knowing total_capacity, use the approximation:
+    #   total_capacity ≈ max(reinforcement, undermining, 1) * 1.5
+    #   (generous estimate — keeps us from under-estimating urgency)
+    total_capacity = max(reinforcement, deficit_per_cycle, 1) * 1.5
+    daily_progress_loss = (deficit_per_cycle / total_capacity) / CYCLE_DAYS
+    if daily_progress_loss <= 0:
+        return None
+    return progress / daily_progress_loss
+
+
+def _next_state(power_state: Optional[str]) -> str:
+    return {"Exploited": "Fortified", "Fortified": "Stronghold"}.get(power_state or "", "next level")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fortify scoring  (public entry point)
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def compute_fortify_scores(
@@ -159,50 +369,27 @@ def compute_fortify_scores(
     weights: dict[str, float],
 ) -> list[RecommendationItem]:
     items: list[RecommendationItem] = []
+    fw = weights.get("fortify_weight", 1.0)
 
     for system in power_systems:
-        snap = snapshots.get(system.id, {})
-        power_state: Optional[str] = snap.get("power_state")
-        reinforcement: Optional[int] = snap.get("reinforcement")
-        undermining: Optional[int] = snap.get("undermining")
+        snap              = snapshots.get(system.id, {})
+        power_state       = snap.get("power_state")
+        reinforcement     = snap.get("reinforcement")
+        undermining       = snap.get("undermining")
+        control_progress  = snap.get("control_progress")
 
-        undermine_ratio: Optional[float] = None
-        if reinforcement and reinforcement > 0 and undermining is not None:
-            undermine_ratio = undermining / reinforcement
+        trend, daily_delta = get_progress_trend(system.id, db)
 
-        score = 0.0
-        reasons: list[str] = []
+        raw_score, reasons, days_to_failure = _fortify_urgency(
+            power_state, reinforcement, undermining, control_progress, trend, daily_delta
+        )
 
-        # Stronghold systems are already maximally defended — skip them entirely
-        # so commanders focus effort where it's actually needed.
-        if power_state == "Stronghold":
-            continue
+        if raw_score <= 0:
+            continue   # healthy or skip
 
-        if power_state == "Turmoil":
-            score += weights["fortify_turmoil"]
-            reasons.append("System in Turmoil — at risk of being lost!")
+        score = raw_score * fw
 
-        elif power_state == "Undermined":
-            score += weights["fortify_undermined"]
-            reasons.append("System is Undermined")
-
-        elif power_state == "Contested":
-            score += weights["fortify_contested"]
-            reasons.append("System is Contested by another power")
-
-        elif power_state == "Exploited" and undermine_ratio is not None and undermine_ratio > 0.3:
-            score += weights["fortify_exploited_ratio"]
-            reasons.append(f"Exploited system under undermining pressure ({undermine_ratio:.0%})")
-
-        if undermine_ratio is not None and undermine_ratio > 0.5:
-            score += weights["fortify_high_ratio"]
-            reasons.append(f"High undermine ratio ({undermine_ratio:.0%})")
-
-        trend = get_undermine_trend(system.id, db)
-        if trend == "worsening":
-            score += weights["fortify_trend_worsening"]
-            reasons.append("Undermining pressure is increasing")
-
+        # Distance bonus
         sx, sy, sz = system.x or 0.0, system.y or 0.0, system.z or 0.0
         distance_from_center: Optional[float] = None
         if center_coords is not None:
@@ -212,19 +399,22 @@ def compute_fortify_scores(
                 score += weights["fortify_near_center"]
                 reasons.append(f"Close to center system ({distance_from_center:.1f} LY)")
 
-        if score <= 0:
-            continue
+        r = reinforcement or 0
+        u = undermining   or 0
+        undermine_ratio: Optional[float] = (u / r) if r > 0 else None
 
         items.append(RecommendationItem(
             system_id64=system.system_id64,
             system_name=system.name,
-            score=score,
+            score=round(score, 1),
             type="fortify",
             reasons=reasons,
             power_state=power_state,
             reinforcement=reinforcement,
             undermining=undermining,
             undermine_ratio=undermine_ratio,
+            control_progress=control_progress,
+            days_to_failure=days_to_failure,
             distance_from_center=distance_from_center,
             threat_trend=trend,
         ))
@@ -233,9 +423,9 @@ def compute_fortify_scores(
     return items
 
 
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Expand scoring
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def compute_expand_scores(
@@ -246,27 +436,22 @@ def compute_expand_scores(
     db: Session,
     weights: dict[str, float],
 ) -> list[RecommendationItem]:
-    """Score nearby systems not yet controlled by this power for expansion."""
-
+    """Score Unoccupied systems near this power's territory for expansion."""
     if not power_systems:
         return []
 
-    power_coords = [(s.x or 0.0, s.y or 0.0, s.z or 0.0) for s in power_systems]
-    power_system_ids = {s.id for s in power_systems}
-    power_allegiance = POWER_ALLEGIANCE.get(power_name)
+    power_coords      = [(s.x or 0.0, s.y or 0.0, s.z or 0.0) for s in power_systems]
+    power_system_ids  = {s.id for s in power_systems}
+    power_allegiance  = POWER_ALLEGIANCE.get(power_name)
 
-    # Bounding box pre-filter: 30 LY around any power system
+    # Bounding box pre-filter: 30 LY around any controlled system
     all_x = [c[0] for c in power_coords]
     all_y = [c[1] for c in power_coords]
     all_z = [c[2] for c in power_coords]
-    min_x, max_x = min(all_x) - 30.0, max(all_x) + 30.0
-    min_y, max_y = min(all_y) - 30.0, max(all_y) + 30.0
-    min_z, max_z = min(all_z) - 30.0, max(all_z) + 30.0
-
     candidates: list[PPSystem] = db.query(PPSystem).filter(
-        PPSystem.x.between(min_x, max_x),
-        PPSystem.y.between(min_y, max_y),
-        PPSystem.z.between(min_z, max_z),
+        PPSystem.x.between(min(all_x) - 30.0, max(all_x) + 30.0),
+        PPSystem.y.between(min(all_y) - 30.0, max(all_y) + 30.0),
+        PPSystem.z.between(min(all_z) - 30.0, max(all_z) + 30.0),
         PPSystem.id.notin_(power_system_ids),
     ).all()
 
@@ -278,22 +463,24 @@ def compute_expand_scores(
         if min_dist > 30.0:
             continue
 
-        snap = snapshots.get(system.id, {})
-        power_state: Optional[str] = snap.get("power_state")
-        current_power: Optional[str] = snap.get("power")
+        snap             = snapshots.get(system.id, {})
+        power_state      = snap.get("power_state")
+        current_power    = snap.get("power")
+        control_progress = snap.get("control_progress") or 0.0
 
-        score = 0.0
+        if power_state != "Unoccupied" and current_power:
+            continue   # skip systems controlled by another power
+
+        score: float = 0.0
         reasons: list[str] = []
 
-        # Actual PP 2.0 states: Exploited | Fortified | Stronghold | Unoccupied
-        # Unoccupied = PP presence but no controlling power — prime expansion target
         if power_state == "Unoccupied":
             score += weights["expand_unoccupied"]
-            reasons.append("System is Unoccupied — prime expansion target")
+            reasons.append("System is Unoccupied — no controlling power")
 
-        if not current_power:
-            score += weights["expand_no_controller"]
-            reasons.append("System has no controlling power")
+        if control_progress > 0.5:
+            score += weights["expand_high_progress"]
+            reasons.append(f"High PP activity in this system (progress {control_progress:.1%})")
 
         if min_dist < 20.0:
             score += weights["expand_proximity"]
@@ -308,16 +495,17 @@ def compute_expand_scores(
 
         distance_from_center: Optional[float] = None
         if center_coords is not None:
-            cx, cy, cz = center_coords
-            distance_from_center = _dist(sx, sy, sz, cx, cy, cz)
+            cx2, cy2, cz2 = center_coords
+            distance_from_center = _dist(sx, sy, sz, cx2, cy2, cz2)
 
         items.append(RecommendationItem(
             system_id64=system.system_id64,
             system_name=system.name,
-            score=score,
+            score=round(score, 1),
             type="expand",
             reasons=reasons,
             power_state=power_state,
+            control_progress=control_progress,
             distance_from_center=distance_from_center,
             threat_trend="unknown",
         ))
@@ -326,9 +514,9 @@ def compute_expand_scores(
     return items[:20]
 
 
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Main entry point
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def compute_recommendations(
@@ -336,13 +524,11 @@ def compute_recommendations(
     center_system_id64: Optional[int],
     db: Session,
 ) -> dict:
-    import logging
     import os
 
-    weights = load_weights(db)
+    weights   = load_weights(db)
     snapshots = get_latest_snapshots(db)
 
-    # All systems currently under this power (latest snapshot says power == power_name)
     powered_system_ids = {
         sid for sid, snap in snapshots.items()
         if snap.get("power") == power_name
@@ -353,15 +539,17 @@ def compute_recommendations(
     power_systems = db.query(PPSystem).filter(PPSystem.id.in_(powered_system_ids)).all()
 
     center_coords: Optional[tuple[float, float, float]] = None
-    center_name: Optional[str] = None
+    center_name:   Optional[str] = None
     if center_system_id64 is not None:
-        center_sys = db.query(PPSystem).filter(PPSystem.system_id64 == center_system_id64).first()
+        center_sys = db.query(PPSystem).filter(
+            PPSystem.system_id64 == center_system_id64
+        ).first()
         if center_sys:
             center_coords = (center_sys.x or 0.0, center_sys.y or 0.0, center_sys.z or 0.0)
-            center_name = center_sys.name
+            center_name   = center_sys.name
 
     fortify = compute_fortify_scores(power_name, center_coords, power_systems, snapshots, db, weights)
-    expand = compute_expand_scores(power_name, center_coords, power_systems, snapshots, db, weights)
+    expand  = compute_expand_scores(power_name, center_coords, power_systems, snapshots, db, weights)
 
     result: dict = {
         "fortify": fortify[:20],
@@ -379,6 +567,6 @@ def compute_recommendations(
                 [i.model_dump() for i in expand[:5]],
             )
         except Exception as exc:
-            logging.getLogger(__name__).warning("LLM summary failed: %s", exc)
+            logger.warning("LLM summary failed: %s", exc)
 
     return result

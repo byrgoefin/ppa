@@ -118,14 +118,20 @@ class RecommendationItem(BaseModel):
     system_id64: int
     system_name: str
     score: float
-    type: str                       # "fortify" | "expand"
+    type: str                           # "fortify" | "expand"
     reasons: list[str]
     power_state: Optional[str] = None
     reinforcement: Optional[int] = None
     undermining: Optional[int] = None
     undermine_ratio: Optional[float] = None
+    # Normalized progress toward next state transition (0.0–1.0+)
+    # < 0 = already past downgrade threshold (critical)
+    # >= 1.0 = past upgrade threshold (no action needed / suppress)
+    control_progress: Optional[float] = None
+    # Estimated days until state degrades; 0.0 = failing now; None = not at risk
+    days_to_failure: Optional[float] = None
     distance_from_center: Optional[float] = None
-    # "rising" | "falling" | "stable" | "unknown"  (based on undermine_ratio trend)
+    # "worsening" | "improving" | "stable" | "unknown"
     threat_trend: str = "unknown"
 
 

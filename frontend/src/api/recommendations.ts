@@ -10,6 +10,10 @@ export interface RecommendationItem {
   reinforcement: number | null;
   undermining: number | null;
   undermine_ratio: number | null;
+  /** Normalized 0.0–1.0+ progress toward next state; <0 = failing now; ≥1 = upgrade ready */
+  control_progress: number | null;
+  /** Estimated days until state downgrade; 0 = failing now; null = not at risk */
+  days_to_failure: number | null;
   distance_from_center: number | null;
   threat_trend: "worsening" | "improving" | "stable" | "unknown";
 }
