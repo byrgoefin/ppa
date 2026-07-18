@@ -63,7 +63,7 @@ export default function PowerSelector({ value, onChange }: Props) {
           value={query}
           onChange={handleInput}
           onFocus={() => results.length > 0 && setOpen(true)}
-          placeholder="Search Power (e.g. Aisling Duval)..."
+          placeholder="Search Power (e.g. Aisling Duval, Jerome Archer)..."
           style={{ flex: 1, border: "none", outline: "none", fontSize: 14, padding: "7px 4px", background: "transparent", fontFamily: "inherit" }}
         />
         {loading && <span style={{ fontSize: 12, color: "#57606a" }}>…</span>}

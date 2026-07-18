@@ -48,40 +48,33 @@ async function apiPatch(path: string, body: unknown) {
 }
 
 // ── Default scoring weights (must match backend services/scoring.py DEFAULTS) ──
+// PP 2.0 actual states: Exploited | Fortified | Stronghold | Unoccupied
 const DEFAULT_WEIGHTS: Record<string, number> = {
   // Fortify
-  fortify_turmoil:           70,
-  fortify_undermined:        55,
-  fortify_contested:         35,
-  fortify_exploited_ratio:   30,
-  fortify_high_ratio:        40,
-  fortify_trend_worsening:   20,
+  fortify_exploited_ratio:   40,
+  fortify_fortified_ratio:   30,
+  fortify_high_ratio:        50,
+  fortify_trend_worsening:   25,
   fortify_near_center:       10,
   // Expand
-  expand_prepared:           60,
-  expand_in_prepare:         50,
-  expand_expansion_state:    40,
-  expand_no_controller:      30,
-  expand_proximity:          20,
+  expand_unoccupied:         55,
+  expand_no_controller:      40,
+  expand_proximity:          25,
   expand_allegiance_match:   15,
 };
 
 const WEIGHT_LABELS: Record<string, string> = {
   // Fortify
-  fortify_turmoil:           "Fortify — Turmoil (system will be lost soon)",
-  fortify_undermined:        "Fortify — Undermined state",
-  fortify_contested:         "Fortify — Contested by another power",
-  fortify_exploited_ratio:   "Fortify — Exploited under undermining pressure (>30%)",
-  fortify_high_ratio:        "Fortify — High undermine ratio (>50%, any state)",
-  fortify_trend_worsening:   "Fortify — Undermining pressure increasing",
+  fortify_exploited_ratio:   "Fortify — Exploited system with undermining pressure (>30%)",
+  fortify_fortified_ratio:   "Fortify — Fortified system still being undermined (>30%)",
+  fortify_high_ratio:        "Fortify — High undermine ratio (>60%, any non-Stronghold)",
+  fortify_trend_worsening:   "Fortify — Undermining pressure is increasing",
   fortify_near_center:       "Fortify — Near center system (<15 LY)",
   // Expand
-  expand_prepared:           "Expand — Prepared state (becoming expansion target)",
-  expand_in_prepare:         "Expand — InPrepareRadius state",
-  expand_expansion_state:    "Expand — Active Expansion state",
-  expand_no_controller:      "Expand — No power controls system",
-  expand_proximity:          "Expand — Close to controlled system (<20 LY)",
-  expand_allegiance_match:   "Expand — Allegiance matches power",
+  expand_unoccupied:         "Expand — System is Unoccupied (no controller, in PP bubble)",
+  expand_no_controller:      "Expand — No controlling power on this system",
+  expand_proximity:          "Expand — Close to a controlled system (<20 LY)",
+  expand_allegiance_match:   "Expand — System allegiance matches power",
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────

@@ -41,45 +41,40 @@ from models.schemas import RecommendationItem
 
 DEFAULTS: dict[str, float] = {
     # ── Fortify weights ──────────────────────────────────────────────────────
-    "fortify_turmoil":           70.0,   # system in Turmoil — will be lost very soon
-    "fortify_undermined":        55.0,   # system is Undermined (not yet Turmoil)
-    "fortify_contested":         35.0,   # system is Contested by another power
-    "fortify_exploited_ratio":   30.0,   # Exploited system with high undermine ratio
-    "fortify_high_ratio":        40.0,   # undermine ratio > 0.5 (any state)
-    "fortify_trend_worsening":   20.0,   # undermine ratio rising across snapshots
+    # Actual PP 2.0 states from Spansh: Exploited | Fortified | Stronghold | Unoccupied
+    "fortify_exploited_ratio":   40.0,   # Exploited system undermining ratio > 0.3
+    "fortify_fortified_ratio":   30.0,   # Fortified system still being undermined (ratio > 0.3)
+    "fortify_high_ratio":        50.0,   # undermine ratio > 0.6 (any non-Stronghold state)
+    "fortify_trend_worsening":   25.0,   # undermine ratio rising across snapshots
     "fortify_near_center":       10.0,   # within 15 LY of the center system
-    # Stronghold systems are already maximally defended — no fortify bonus
-    # (we actively suppress them from fortify list via the engine)
+    # Stronghold = already max defense, skip entirely
 
     # ── Expand weights ───────────────────────────────────────────────────────
-    "expand_prepared":           60.0,   # Prepared state — actively becoming expansion target
-    "expand_in_prepare":         50.0,   # InPrepareRadius — prime expansion target
-    "expand_expansion_state":    40.0,   # Expansion state — actively expanding
-    "expand_no_controller":      30.0,   # no power currently controls the system
-    "expand_proximity":          20.0,   # within 20 LY of a power-controlled system
+    "expand_unoccupied":         55.0,   # Unoccupied system in PP bubble — prime target
+    "expand_no_controller":      40.0,   # no controlling_power yet
+    "expand_proximity":          25.0,   # within 20 LY of a power-controlled system
     "expand_allegiance_match":   15.0,   # system allegiance matches the power
 }
 
 # Map powers to their typical allegiance (for expand allegiance bonus).
-# Includes all PP 2.0 powers as of 2024-2025.
+# Uses the abbreviated names as returned by Spansh API (confirmed July 2026).
 POWER_ALLEGIANCE: dict[str, str] = {
     # Empire
-    "Arissa Lavigny-Duval": "Empire",
-    "Aisling Duval":        "Empire",
-    "Zemina Torval":        "Empire",
-    "Denton Patreus":       "Empire",
+    "A. Lavigny-Duval": "Empire",      # Arissa Lavigny-Duval (Spansh abbreviates)
+    "Aisling Duval":    "Empire",
+    "Zemina Torval":    "Empire",
+    "Denton Patreus":   "Empire",
     # Federation
-    "Zachary Hudson":       "Federation",
-    "Felicia Winters":      "Federation",
-    "Jerome Archer":        "Federation",
+    "Felicia Winters":  "Federation",
+    "Jerome Archer":    "Federation",
     # Alliance
-    "Edmund Mahon":         "Alliance",
-    "Nakato Kaine":         "Alliance",
+    "Edmund Mahon":     "Alliance",
+    "Nakato Kaine":     "Alliance",
     # Independent
-    "Pranav Antal":         "Independent",
-    "Li Yong-Rui":          "Independent",
-    "Archon Delaine":       "Independent",
-    "Yuri Grom":            "Independent",
+    "Pranav Antal":     "Independent",
+    "Li Yong-Rui":      "Independent",
+    "Archon Delaine":   "Independent",
+    "Yuri Grom":        "Independent",
 }
 
 
@@ -290,17 +285,11 @@ def compute_expand_scores(
         score = 0.0
         reasons: list[str] = []
 
-        if power_state == "Prepared":
-            score += weights["expand_prepared"]
-            reasons.append("System is Prepared — becoming expansion target")
-
-        elif power_state == "InPrepareRadius":
-            score += weights["expand_in_prepare"]
-            reasons.append("System is in prepare radius — prime expansion target")
-
-        elif power_state == "Expansion":
-            score += weights["expand_expansion_state"]
-            reasons.append("System is actively in Expansion state")
+        # Actual PP 2.0 states: Exploited | Fortified | Stronghold | Unoccupied
+        # Unoccupied = PP presence but no controlling power — prime expansion target
+        if power_state == "Unoccupied":
+            score += weights["expand_unoccupied"]
+            reasons.append("System is Unoccupied — prime expansion target")
 
         if not current_power:
             score += weights["expand_no_controller"]

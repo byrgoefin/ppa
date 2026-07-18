@@ -1,36 +1,50 @@
-"""Spansh Power Play bulk ingestion service.
+"""Spansh Power Play ingestion service — uses the Spansh search API.
 
-Data source: https://downloads.spansh.co.uk/systems_populated.json.gz
+Data source: POST https://spansh.co.uk/api/systems/search
+             with filter controlling_power = <power name>
 
-The file is a gzip-compressed JSON array of system objects.  Each object
-with a ``controlling_power`` field is a PP-active system.
+This is the correct source for PP 2.0 data.  The bulk download files
+(systems_populated.json.gz, galaxy.json.gz) do NOT contain PP fields.
 
-PP 2.0 schema (confirmed from Spansh API):
+Actual PP 2.0 schema from the Spansh API (confirmed 2026-07):
 {
-  "id64": 10477373803,
-  "name": "Sol",
-  "coords": {"x": 0.0, "y": 0.0, "z": 0.0},
-  "allegiance": "Federation",
-  "population": 18320926115,
-  "controlling_power": "Jerome Archer",
-  "power": ["Aisling Duval", "Jerome Archer"],
-  "power_state": "Stronghold",
-  "power_state_control_progress": 0.649698,
-  "power_state_reinforcement": 66756,
-  "power_state_undermining": 124458,
-  "updated_at": "2026-07-18 03:51:09+00"
+  "id64": 203174175932,
+  "name": "52 h2 Sagittarii",
+  "x": -46.0,
+  "y": -68.3125,
+  "z": 170.8125,
+  "allegiance": "Independent",
+  "population": 68496,
+  "controlling_power": "Aisling Duval",
+  "power": ["Aisling Duval"],
+  "power_state": "Exploited",         -- Exploited | Fortified | Stronghold | Unoccupied
+  "power_state_control_progress": 0.259166,
+  "power_state_reinforcement": 0,
+  "power_state_undermining": 291,
+  "updated_at": "2026-07-17 18:46:04+00"
 }
 
-Systems with no PP presence have null / absent power fields — we skip those.
+Coords are FLAT (x/y/z at top level, not nested).
+Power name for Arissa is "A. Lavigny-Duval" (abbreviated), not full name.
+
+Known powers (from field_values endpoint, July 2026):
+  A. Lavigny-Duval, Aisling Duval, Archon Delaine, Denton Patreus,
+  Edmund Mahon, Felicia Winters, Jerome Archer, Li Yong-Rui,
+  Nakato Kaine, Pranav Antal, Yuri Grom, Zemina Torval
+
+Known PP states (from field_values endpoint):
+  Exploited (13,263 systems), Fortified (2,827), Stronghold (1,414),
+  Unoccupied (34,949 — systems with PP presence but no controlling power)
+
+We ingest ALL powers in a single run so the full galaxy picture is available.
+For each power we page through the search API 500 systems at a time.
 """
 
-import gzip
-import io
 import logging
+import time
 from datetime import datetime
-from typing import Iterator
+from typing import Optional
 
-import ijson
 import requests
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -39,79 +53,72 @@ from models.models import IngestionRun
 
 logger = logging.getLogger(__name__)
 
-SPANSH_PP_URL = "https://downloads.spansh.co.uk/systems_populated.json.gz"
-BATCH_COMMIT_SIZE = 500
+SPANSH_SEARCH_URL = "https://spansh.co.uk/api/systems/search"
+PAGE_SIZE = 500          # max Spansh allows per request
+REQUEST_DELAY = 0.25     # seconds between pages — be polite to Spansh
+BATCH_COMMIT_SIZE = 500  # DB commit frequency
+
+# All known powers as of July 2026 (abbreviated names as Spansh returns them)
+ALL_POWERS = [
+    "A. Lavigny-Duval",
+    "Aisling Duval",
+    "Archon Delaine",
+    "Denton Patreus",
+    "Edmund Mahon",
+    "Felicia Winters",
+    "Jerome Archer",
+    "Li Yong-Rui",
+    "Nakato Kaine",
+    "Pranav Antal",
+    "Yuri Grom",
+    "Zemina Torval",
+]
 
 # ---------------------------------------------------------------------------
-# Download helpers
+# Spansh API helpers
 # ---------------------------------------------------------------------------
 
-# How many compressed bytes to buffer before starting the stream parse.
-# Keeping the full file in memory is fine for a ~600 MB download on a server;
-# it also avoids the tricky "requests streaming + GzipFile" EOF issue that
-# causes ijson to see 0 items when the HTTP connection closes mid-stream.
-DOWNLOAD_CHUNK = 1024 * 1024  # 1 MB per chunk
 
-
-def _download_to_memory(url: str) -> bytes:
-    """Download the full .gz file into memory and return the compressed bytes."""
-    logger.info("Downloading %s …", url)
-    resp = requests.get(url, stream=True, timeout=300)
+def _fetch_page(power: str, page: int) -> dict:
+    """Fetch one page of systems for a power from the Spansh search API."""
+    payload = {
+        "filters": {
+            "controlling_power": {"value": [power], "comparison": "="}
+        },
+        "size": PAGE_SIZE,
+        "page": page,
+        "sort": [{"id64": {"direction": "asc"}}],
+    }
+    resp = requests.post(SPANSH_SEARCH_URL, json=payload, timeout=60)
     resp.raise_for_status()
-
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK):
-        if chunk:
-            chunks.append(chunk)
-            total += len(chunk)
-            if total % (50 * DOWNLOAD_CHUNK) == 0:
-                logger.info("  … %.0f MB downloaded", total / 1_048_576)
-
-    compressed = b"".join(chunks)
-    logger.info("Download complete: %.1f MB compressed", len(compressed) / 1_048_576)
-    return compressed
+    return resp.json()
 
 
-def _detect_ijson_prefix(decompressed_head: bytes) -> str:
-    """Peek at the first few bytes to determine the correct ijson prefix.
+def _iter_power_systems(power: str):
+    """Yield all system dicts for a given power, paging through the API."""
+    page = 0
+    total_reported = None
 
-    Returns 'item' if the root is an array, or '<key>.item' if the root is
-    an object whose first value is an array.
-    """
-    head = decompressed_head.lstrip()
-    if head.startswith(b"["):
-        return "item"
+    while True:
+        logger.debug("Fetching page %d for power '%s'", page, power)
+        data = _fetch_page(power, page)
 
-    if head.startswith(b"{"):
-        # Try to find the first string key
-        # e.g.  {"systems": [  or  {"data": [
-        try:
-            import re
-            m = re.search(rb'"([^"]+)"\s*:\s*\[', head[:512])
-            if m:
-                key = m.group(1).decode("utf-8", errors="replace")
-                logger.info("Top-level JSON object detected; using prefix '%s.item'", key)
-                return f"{key}.item"
-        except Exception:
-            pass
-        logger.warning("Top-level JSON object but could not detect array key; trying 'item'")
-        return "item"
+        if total_reported is None:
+            total_reported = data.get("count", 0)
+            logger.info("  Power '%s': %d systems reported by API", power, total_reported)
 
-    logger.warning("Unexpected JSON prefix: %r; defaulting to 'item'", head[:20])
-    return "item"
+        results = data.get("results", [])
+        if not results:
+            break
 
+        yield from results
+        page += 1
 
-def _iter_systems(compressed: bytes) -> Iterator[dict]:
-    """Decompress and stream-parse system objects from the Spansh dump."""
-    decompressed = gzip.decompress(compressed)
-    logger.info("Decompressed size: %.1f MB", len(decompressed) / 1_048_576)
+        # Stop if we've seen all systems (avoid infinite loop on API quirks)
+        if total_reported is not None and (page * PAGE_SIZE) >= total_reported:
+            break
 
-    prefix = _detect_ijson_prefix(decompressed[:512])
-    logger.info("Using ijson prefix: '%s'", prefix)
-
-    buf = io.BytesIO(decompressed)
-    yield from ijson.items(buf, prefix)
+        time.sleep(REQUEST_DELAY)
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +127,11 @@ def _iter_systems(compressed: bytes) -> Iterator[dict]:
 
 
 def run_spansh_ingest(db: Session) -> IngestionRun:
-    """Download the Spansh systems_populated dump and store PP snapshots.
+    """Fetch PP system data from the Spansh search API and store snapshots.
 
-    Only systems that have a non-null ``controlling_power`` are stored.
-    Inserts one pp_system_snapshots row per system per call (insert-only,
-    never updated) so the full history accumulates for trend analysis.
+    Iterates over all known Powers, paging through the Spansh search API
+    500 systems at a time.  Inserts one pp_system_snapshots row per system
+    per call (insert-only) so the full history accumulates.
     """
     run = IngestionRun(
         source="spansh_pp",
@@ -136,134 +143,96 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
     db.commit()
     db.refresh(run)
     run_id: int = run.id
-    logger.info("Spansh PP ingest started (run_id=%d)", run_id)
+    logger.info("Spansh PP ingest started via search API (run_id=%d)", run_id)
 
     records_processed = 0
-    total_seen = 0
 
     try:
-        compressed = _download_to_memory(SPANSH_PP_URL)
-        logger.info("Parsing system objects …")
+        for power in ALL_POWERS:
+            logger.info("Ingesting power: %s", power)
+            power_count = 0
 
-        for system_obj in _iter_systems(compressed):
-            total_seen += 1
+            for system_obj in _iter_power_systems(power):
+                system_id64: Optional[int] = system_obj.get("id64")
+                if system_id64 is None:
+                    continue
 
-            # Log the first object's keys so we can verify the schema
-            if total_seen == 1:
-                logger.info(
-                    "First system object keys: %s",
-                    list(system_obj.keys()) if isinstance(system_obj, dict) else type(system_obj),
+                name: str = system_obj.get("name", "")
+
+                # Coords are flat in the API response
+                x: Optional[float] = system_obj.get("x")
+                y: Optional[float] = system_obj.get("y")
+                z: Optional[float] = system_obj.get("z")
+                # Fallback: try nested coords dict (future-proofing)
+                if x is None:
+                    coords = system_obj.get("coords") or {}
+                    x = coords.get("x")
+                    y = coords.get("y")
+                    z = coords.get("z")
+
+                allegiance: Optional[str]  = system_obj.get("allegiance")
+                population: Optional[int]  = system_obj.get("population")
+                power_state: Optional[str] = system_obj.get("power_state")
+                control_progress: Optional[float] = system_obj.get("power_state_control_progress")
+                reinforcement: Optional[int] = system_obj.get("power_state_reinforcement")
+                undermining: Optional[int]   = system_obj.get("power_state_undermining")
+
+                # Upsert the system record
+                sys_result = db.execute(
+                    text("""
+                        INSERT INTO pp_systems (system_id64, name, x, y, z, allegiance, population)
+                        VALUES (:id64, :name, :x, :y, :z, :allegiance, :population)
+                        ON CONFLICT (system_id64) DO UPDATE
+                            SET name       = EXCLUDED.name,
+                                x          = EXCLUDED.x,
+                                y          = EXCLUDED.y,
+                                z          = EXCLUDED.z,
+                                allegiance = EXCLUDED.allegiance,
+                                population = EXCLUDED.population
+                        RETURNING id
+                    """),
+                    {
+                        "id64": system_id64, "name": name,
+                        "x": x, "y": y, "z": z,
+                        "allegiance": allegiance, "population": population,
+                    },
                 )
-                if isinstance(system_obj, dict):
-                    logger.info(
-                        "First system PP fields — controlling_power=%r  power_state=%r  power=%r",
-                        system_obj.get("controlling_power"),
-                        system_obj.get("power_state"),
-                        system_obj.get("power"),
-                    )
+                system_db_id: int = sys_result.scalar_one()
 
-            if total_seen % 50_000 == 0:
-                logger.info(
-                    "  … %d total systems scanned, %d PP systems stored",
-                    total_seen, records_processed,
+                # Insert a fresh snapshot row (insert-only for history)
+                db.execute(
+                    text("""
+                        INSERT INTO pp_system_snapshots
+                            (system_id, ingestion_run_id, snapshot_time,
+                             power, power_state, control_progress,
+                             reinforcement, undermining)
+                        VALUES
+                            (:system_id, :run_id, :now,
+                             :power, :power_state, :control_progress,
+                             :reinforcement, :undermining)
+                    """),
+                    {
+                        "system_id": system_db_id,
+                        "run_id": run_id,
+                        "now": datetime.utcnow(),
+                        "power": power,
+                        "power_state": power_state,
+                        "control_progress": control_progress,
+                        "reinforcement": reinforcement,
+                        "undermining": undermining,
+                    },
                 )
 
-            if not isinstance(system_obj, dict):
-                continue
+                records_processed += 1
+                power_count += 1
+                if records_processed % BATCH_COMMIT_SIZE == 0:
+                    db.commit()
+                    logger.debug("  … %d total records committed", records_processed)
 
-            # Skip systems with no PP controlling power
-            controlling_power: str | None = system_obj.get("controlling_power")
-            if not controlling_power:
-                continue
+            db.commit()
+            logger.info("  Finished '%s': %d systems stored", power, power_count)
 
-            system_id64: int | None = system_obj.get("id64")
-            if system_id64 is None:
-                continue
-
-            name: str = system_obj.get("name", "")
-
-            # coords may be a nested dict {"x": ..., "y": ..., "z": ...}
-            # or flat top-level keys — handle both
-            coords = system_obj.get("coords")
-            if isinstance(coords, dict):
-                x: float | None = coords.get("x")
-                y: float | None = coords.get("y")
-                z: float | None = coords.get("z")
-            else:
-                x = system_obj.get("x")
-                y = system_obj.get("y")
-                z = system_obj.get("z")
-
-            allegiance: str | None = system_obj.get("allegiance")
-            population: int | None = system_obj.get("population")
-            power_state: str | None = system_obj.get("power_state")
-            control_progress: float | None = system_obj.get("power_state_control_progress")
-            reinforcement: int | None = system_obj.get("power_state_reinforcement")
-            undermining: int | None = system_obj.get("power_state_undermining")
-
-            # Upsert the system record
-            sys_result = db.execute(
-                text("""
-                    INSERT INTO pp_systems (system_id64, name, x, y, z, allegiance, population)
-                    VALUES (:id64, :name, :x, :y, :z, :allegiance, :population)
-                    ON CONFLICT (system_id64) DO UPDATE
-                        SET name       = EXCLUDED.name,
-                            x          = EXCLUDED.x,
-                            y          = EXCLUDED.y,
-                            z          = EXCLUDED.z,
-                            allegiance = EXCLUDED.allegiance,
-                            population = EXCLUDED.population
-                    RETURNING id
-                """),
-                {
-                    "id64": system_id64, "name": name,
-                    "x": x, "y": y, "z": z,
-                    "allegiance": allegiance, "population": population,
-                },
-            )
-            system_db_id: int = sys_result.scalar_one()
-
-            # Insert a fresh snapshot row (insert-only for full history)
-            db.execute(
-                text("""
-                    INSERT INTO pp_system_snapshots
-                        (system_id, ingestion_run_id, snapshot_time,
-                         power, power_state, control_progress,
-                         reinforcement, undermining)
-                    VALUES
-                        (:system_id, :run_id, :now,
-                         :power, :power_state, :control_progress,
-                         :reinforcement, :undermining)
-                """),
-                {
-                    "system_id": system_db_id,
-                    "run_id": run_id,
-                    "now": datetime.utcnow(),
-                    "power": controlling_power,
-                    "power_state": power_state,
-                    "control_progress": control_progress,
-                    "reinforcement": reinforcement,
-                    "undermining": undermining,
-                },
-            )
-
-            records_processed += 1
-            if records_processed % BATCH_COMMIT_SIZE == 0:
-                db.commit()
-                logger.debug("Committed batch; %d PP systems stored so far", records_processed)
-
-        db.commit()
-        logger.info(
-            "Parse complete: %d total systems scanned, %d PP systems stored (run_id=%d)",
-            total_seen, records_processed, run_id,
-        )
-
-        if total_seen == 0:
-            logger.error(
-                "ZERO systems were yielded by ijson — the JSON prefix is likely wrong. "
-                "Run probe_spansh.py on the server to inspect the file structure."
-            )
-
+        # Final update
         db.execute(
             text("""
                 UPDATE ingestion_runs
@@ -274,6 +243,10 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
         )
         db.commit()
         db.refresh(run)
+        logger.info(
+            "Spansh PP ingest complete: %d total systems across %d powers (run_id=%d)",
+            records_processed, len(ALL_POWERS), run_id,
+        )
 
     except Exception:
         logger.exception("Spansh PP ingest failed (run_id=%d)", run_id)
