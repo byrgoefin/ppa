@@ -92,6 +92,21 @@ DEFAULTS: dict[str, float] = {
     "fortify_weight":             1.0,    # global fortify multiplier
     "fortify_near_center":        15.0,   # bonus if within 15 LY of center system
 
+    # ── Fortification alert thresholds (days-to-failure cutoffs) ─────────────
+    # Each value is a number of DAYS.  When days_to_failure falls below the
+    # threshold the corresponding urgency band fires.  Applies per power-state.
+    # Default values mirror the hard-coded bands used before this was made
+    # configurable: URGENT < 7d, WARNING < 21d (three full cycles).
+    "exploited_threshold_critical":  0.0,   # progress ≤ 0 → already failing (not days-based)
+    "exploited_threshold_urgent":    7.0,   # days_to_failure < this → URGENT
+    "exploited_threshold_warning":  21.0,   # days_to_failure < this → WARNING
+    "fortified_threshold_critical":  0.0,
+    "fortified_threshold_urgent":    7.0,
+    "fortified_threshold_warning":  21.0,
+    "stronghold_threshold_critical": 0.0,
+    "stronghold_threshold_urgent":   7.0,
+    "stronghold_threshold_warning":  21.0,
+
     # ── Expand ───────────────────────────────────────────────────────────────
     "expand_unoccupied":          60.0,   # base score for Unoccupied system
     "expand_high_progress":       30.0,   # bonus if progress > 0.5 (primed)
@@ -326,6 +341,7 @@ def _fortify_urgency(
     trend: str,
     daily_delta: Optional[float],
     snapshot_time: Optional[datetime] = None,
+    weights: Optional[dict] = None,
 ) -> tuple[float, list[str], Optional[float]]:
     """Compute a fortify urgency score (0–1000+), reasons, and days_to_failure.
 
@@ -338,11 +354,11 @@ def _fortify_urgency(
     days_to_failure = buffer_merits / (U - R)   [only computed when U > R]
       where buffer_merits = progress × band_width
 
-    Urgency bands:
+    Urgency bands (thresholds configurable via weights / Admin panel):
       CRITICAL  (1000) : progress ≤ 0          — downgrade happening NOW
-      URGENT    ( 800) : days < 7              — less than one full cycle
-      WARNING   ( 600) : days < 21             — less than three cycles
-      MONITOR   ( 300) : net negative, days ≥ 21
+      URGENT    ( 800) : days < urgent_threshold  (default 7d)
+      WARNING   ( 600) : days < warning_threshold (default 21d)
+      MONITOR   ( 300) : net negative, days ≥ warning_threshold
       UPGRADE   ( 150) : net positive, within 20% of upgrade threshold
         0              : healthy, no action needed
        -1              : skip (Stronghold with no threat, or already maxed)
@@ -358,6 +374,12 @@ def _fortify_urgency(
 
     # Pre-compute absolute merit context for inclusion in reasons
     mf = _merit_fields(power_state, p)
+
+    # ── Resolve per-state day thresholds ──────────────────────────────────
+    w = weights or {}
+    state_key = (power_state or "exploited").lower()
+    urgent_days  = float(w.get(f"{state_key}_threshold_urgent",  DEFAULTS.get(f"{state_key}_threshold_urgent",  7.0)))
+    warning_days = float(w.get(f"{state_key}_threshold_warning", DEFAULTS.get(f"{state_key}_threshold_warning", 21.0)))
 
     # ── 1. Stronghold ──────────────────────────────────────────────────────
     # Stronghold is the highest state — only flag if ACTIVELY being undermined.
@@ -379,10 +401,10 @@ def _fortify_urgency(
         elif u > r:
             # Being undermined — compute days using buffer/net formula
             days_to_failure = _estimate_days(p, power_state, r, u, snapshot_time)
-            if days_to_failure is not None and days_to_failure < 7.0:
+            if days_to_failure is not None and days_to_failure < urgent_days:
                 score = SCORE_URGENT
                 reasons.append(f"⚠ Stronghold under active attack — ~{days_to_failure:.1f}d to drop to Fortified")
-            elif days_to_failure is not None and days_to_failure < 21.0:
+            elif days_to_failure is not None and days_to_failure < warning_days:
                 score = SCORE_WARNING
                 reasons.append(f"⚠ Stronghold being undermined — ~{days_to_failure:.1f}d to drop to Fortified")
             else:
@@ -423,8 +445,8 @@ def _fortify_urgency(
     # _estimate_days returns None when R >= U — system is not threatened
     days_to_failure = _estimate_days(p, power_state, r, u, snapshot_time)
 
-    if days_to_failure is not None and days_to_failure < 7.0:
-        # U > R AND buffer runs out in < 1 cycle — urgent
+    if days_to_failure is not None and days_to_failure < urgent_days:
+        # U > R AND buffer runs out within urgent threshold
         elapsed = days_elapsed_in_cycle(snapshot_time)
         score = SCORE_URGENT
         reasons.append(
@@ -435,8 +457,8 @@ def _fortify_urgency(
             f"Buffer: {mf['buffer_merits']:,} merits · Cycle net: {u-r:,} over {elapsed:.1f}d "
             f"({(u-r)/elapsed:.0f}/day) · Need {mf['merits_to_safety']:,} to safety"
         )
-    elif days_to_failure is not None and days_to_failure < 21.0:
-        # U > R AND buffer runs out in < 3 cycles — warning
+    elif days_to_failure is not None and days_to_failure < warning_days:
+        # U > R AND buffer runs out within warning threshold
         elapsed = days_elapsed_in_cycle(snapshot_time)
         score = SCORE_WARNING
         reasons.append(
@@ -563,7 +585,7 @@ def compute_fortify_scores(
 
         raw_score, reasons, days_to_failure = _fortify_urgency(
             power_state, reinforcement, undermining, control_progress,
-            trend, daily_delta, snapshot_time,
+            trend, daily_delta, snapshot_time, weights,
         )
 
         if raw_score <= 0:

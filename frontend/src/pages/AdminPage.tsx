@@ -71,6 +71,46 @@ const WEIGHT_LABELS: Record<string, string> = {
   expand_allegiance_match: "Expand — Bonus: allegiance matches power",
 };
 
+// ── Fortification alert thresholds (days-to-failure) ─────────────────────────
+// Keys must match backend DEFAULTS exactly.  Values are in DAYS.
+const DEFAULT_THRESHOLDS: Record<string, number> = {
+  exploited_threshold_urgent:    7,
+  exploited_threshold_warning:  21,
+  fortified_threshold_urgent:    7,
+  fortified_threshold_warning:  21,
+  stronghold_threshold_urgent:   7,
+  stronghold_threshold_warning: 21,
+};
+
+// Band widths used to compute absolute merit equivalents for display labels
+const BAND_WIDTH: Record<string, number> = {
+  exploited:  213_000,   // 333k − 120k
+  fortified:  334_000,   // 667k − 333k
+  stronghold: 334_000,   // open-ended proxy
+};
+
+interface ThresholdGroup {
+  state: "exploited" | "fortified" | "stronghold";
+  label: string;
+  color: string;
+}
+const THRESHOLD_GROUPS: ThresholdGroup[] = [
+  { state: "exploited",  label: "Exploited",  color: "#e67e22" },
+  { state: "fortified",  label: "Fortified",  color: "#3b82d4" },
+  { state: "stronghold", label: "Stronghold", color: "#9b59b6" },
+];
+
+// Helper: merit equivalent for a days threshold  (days × daily_net ≈ buffer at risk)
+// We approximate using band_width as a "buffer proxy": pct_of_band = days / 7
+// This is purely illustrative — actual value depends on live R/U rates.
+// Instead, show the absolute merit band boundary and the days label directly.
+function meritEquiv(state: ThresholdGroup["state"], days: number): string {
+  const band = BAND_WIDTH[state];
+  // If buffer = p × band, then at the threshold the buffer at risk ≈ (days/7) × band
+  const equiv = Math.round((days / 7) * band);
+  return equiv.toLocaleString();
+}
+
 // ── Status badge ──────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, string> = { completed: "#4AD94A", failed: "#D94A4A", running: "#FF8C00" };
@@ -91,7 +131,8 @@ export default function AdminPage({ onClose }: Props) {
   const [isLoggedIn, setIsLoggedIn] = useState(!!getAdminToken());
 
   const [status, setStatus] = useState<AdminStatus | null>(null);
-  const [settings, setSettings] = useState<Record<string, number>>({});
+  const [settings, setSettings]     = useState<Record<string, number>>({});
+  const [thresholds, setThresholds] = useState<Record<string, number>>({ ...DEFAULT_THRESHOLDS });
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -106,8 +147,13 @@ export default function AdminPage({ onClose }: Props) {
       .then(([st, sets]) => {
         setStatus(st);
         const w: Record<string, number> = { ...DEFAULT_WEIGHTS };
-        sets.forEach((s) => { if (s.key in w) w[s.key] = parseFloat(s.value); });
+        const t: Record<string, number> = { ...DEFAULT_THRESHOLDS };
+        sets.forEach((s) => {
+          if (s.key in w) w[s.key] = parseFloat(s.value);
+          if (s.key in t) t[s.key] = parseFloat(s.value);
+        });
         setSettings(w);
+        setThresholds(t);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -154,7 +200,10 @@ export default function AdminPage({ onClose }: Props) {
   async function saveSettings() {
     setSettingsSaved(false);
     try {
-      const payload = Object.entries(settings).map(([key, value]) => ({ key, value: String(value) }));
+      const payload = [
+        ...Object.entries(settings),
+        ...Object.entries(thresholds),
+      ].map(([key, value]) => ({ key, value: String(value) }));
       await apiPatch("/api/admin/settings", payload);
       setSettingsSaved(true);
       setTimeout(() => setSettingsSaved(false), 3000);
@@ -278,7 +327,7 @@ export default function AdminPage({ onClose }: Props) {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
           <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>Scoring Weights</h3>
           <button onClick={saveSettings} style={{ padding: "6px 16px", fontSize: 13, background: "#4AD94A", color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", fontWeight: 600 }}>
-            {settingsSaved ? "✓ Saved!" : "Save Weights"}
+            {settingsSaved ? "✓ Saved!" : "Save All Settings"}
           </button>
         </div>
         <p style={{ fontSize: 12, color: "#57606a", margin: "0 0 16px" }}>
@@ -334,6 +383,94 @@ export default function AdminPage({ onClose }: Props) {
             );
           })}
         </div>
+      </div>
+
+      {/* Fortification Alert Thresholds */}
+      <div style={cardStyle}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>Fortification Alert Thresholds</h3>
+          <span style={{ fontSize: 11, color: "#57606a" }}>Saved with "Save All Settings" above</span>
+        </div>
+        <p style={{ fontSize: 12, color: "#57606a", margin: "0 0 18px" }}>
+          Set the <strong>days-to-failure</strong> cutoffs that trigger each alert band, independently per power state.
+          A system whose buffer will be exhausted within the <em>Urgent</em> threshold fires a 🔴 URGENT alert;
+          within <em>Warning</em> fires a 🟡 WARNING alert; beyond Warning is 🔵 MONITOR only.
+          The merit equivalent shown is illustrative (assumes 1/7 of band used per day at average rate).
+        </p>
+
+        {THRESHOLD_GROUPS.map(({ state, label, color }) => {
+          const urgentKey  = `${state}_threshold_urgent`;
+          const warningKey = `${state}_threshold_warning`;
+          const urgentVal  = thresholds[urgentKey]  ?? DEFAULT_THRESHOLDS[urgentKey];
+          const warningVal = thresholds[warningKey] ?? DEFAULT_THRESHOLDS[warningKey];
+          const urgentDef  = DEFAULT_THRESHOLDS[urgentKey];
+          const warningDef = DEFAULT_THRESHOLDS[warningKey];
+          const urgentChanged  = urgentVal  !== urgentDef;
+          const warningChanged = warningVal !== warningDef;
+
+          return (
+            <div key={state} style={{ marginBottom: 20 }}>
+              {/* State header */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <div style={{ width: 10, height: 10, borderRadius: "50%", background: color }} />
+                <span style={{ fontSize: 13, fontWeight: 700, color }}>{label}</span>
+                <span style={{ fontSize: 11, color: "#57606a" }}>band width: {BAND_WIDTH[state].toLocaleString()} merits</span>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 40px" }}>
+                {/* Urgent threshold */}
+                {[
+                  { key: urgentKey,  val: urgentVal,  def: urgentDef,  changed: urgentChanged,  band: "🔴 Urgent",  setter: (v: number) => setThresholds((p) => ({ ...p, [urgentKey]: v })),  accent: "#D94A4A" },
+                  { key: warningKey, val: warningVal, def: warningDef, changed: warningChanged, band: "🟡 Warning", setter: (v: number) => setThresholds((p) => ({ ...p, [warningKey]: v })), accent: "#FF8C00" },
+                ].map(({ key, val, def, changed, band, setter, accent }) => (
+                  <div key={key}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <label style={{ fontSize: 12, color: changed ? "#1f2328" : "#57606a", fontWeight: changed ? 600 : 400 }}>
+                        {band} — fire when days to failure &lt; threshold
+                      </label>
+                      {changed && (
+                        <button
+                          onClick={() => setter(def)}
+                          title={`Reset to default (${def}d)`}
+                          style={{ fontSize: 10, color: "#57606a", background: "none", border: "1px solid #e5e7eb", borderRadius: 3, padding: "1px 5px", cursor: "pointer" }}
+                        >
+                          reset
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input
+                        type="range" min={1} max={90} step={1}
+                        value={val}
+                        onChange={(e) => setter(Number(e.target.value))}
+                        style={{ flex: 1, accentColor: changed ? accent : "#ccc" }}
+                      />
+                      <input
+                        type="number" min={1} max={999} step={1}
+                        value={val}
+                        onChange={(e) => {
+                          const n = parseInt(e.target.value, 10);
+                          if (!isNaN(n) && n >= 1) setter(n);
+                        }}
+                        style={{
+                          width: 56, padding: "4px 6px", fontSize: 13, fontWeight: 600,
+                          border: `1px solid ${changed ? accent : "#e5e7eb"}`,
+                          borderRadius: 5, textAlign: "right",
+                          color: changed ? accent : "#57606a",
+                          outline: "none",
+                        }}
+                      />
+                      <span style={{ fontSize: 11, color: "#57606a", whiteSpace: "nowrap" }}>days</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: "#bbb", marginTop: 1 }}>
+                      default: {def}d · ≈ {meritEquiv(state, val)} merits at risk
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
