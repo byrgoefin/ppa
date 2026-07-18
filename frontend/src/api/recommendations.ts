@@ -35,10 +35,10 @@ export interface RecommendationsResponse {
 
 export async function getRecommendations(
   powerName: string,
-  centerSystemId64?: number,
+  refSystemId64?: number,
 ): Promise<RecommendationsResponse> {
   const params = new URLSearchParams();
-  if (centerSystemId64 != null) params.set("center_id", String(centerSystemId64));
+  if (refSystemId64 != null) params.set("ref_id", String(refSystemId64));
   const qs = params.toString() ? `?${params.toString()}` : "";
   const res = await fetch(
     `/api/powers/${encodeURIComponent(powerName)}/recommendations${qs}`

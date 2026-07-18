@@ -75,14 +75,18 @@ def search_powers(
 @router.get("/{name}/systems", response_model=list[PPSystemEntry])
 def get_power_systems(
     name: str,
-    center_id: Optional[int] = Query(default=None),
+    center_id: Optional[int] = Query(default=None),   # legacy param kept for compatibility
+    ref_id:    Optional[int] = Query(default=None),    # preferred param name
     db: Session = Depends(get_db),
 ) -> list[PPSystemEntry]:
     """
     Return all systems currently under the given Power's influence,
     enriched with their latest PP snapshot.  Optionally compute distance
-    from a center system when center_id (system_id64) is supplied.
+    from a reference system when ref_id (or legacy center_id) system_id64 is supplied.
     """
+    # Accept either ref_id or legacy center_id
+    resolved_ref_id = ref_id if ref_id is not None else center_id
+
     # Latest snapshot per system
     latest_sql = text("""
         SELECT DISTINCT ON (system_id)
@@ -103,12 +107,12 @@ def get_power_systems(
     systems = db.query(PPSystem).filter(PPSystem.id.in_(system_ids)).all()
     sys_by_id = {s.id: s for s in systems}
 
-    # Resolve center coords
+    # Resolve reference coords
     cx: Optional[float] = None
     cy: Optional[float] = None
     cz: Optional[float] = None
-    if center_id is not None:
-        center_sys = db.query(PPSystem).filter(PPSystem.system_id64 == center_id).first()
+    if resolved_ref_id is not None:
+        center_sys = db.query(PPSystem).filter(PPSystem.system_id64 == resolved_ref_id).first()
         if center_sys:
             cx, cy, cz = center_sys.x, center_sys.y, center_sys.z
 
@@ -159,11 +163,13 @@ def get_power_systems(
 @router.get("/{name}/recommendations", response_model=RecommendationsResponse)
 def get_power_recommendations(
     name: str,
-    center_id: Optional[int] = Query(default=None),
+    center_id: Optional[int] = Query(default=None),   # legacy param kept for compatibility
+    ref_id:    Optional[int] = Query(default=None),    # preferred param name
     db: Session = Depends(get_db),
 ) -> RecommendationsResponse:
     """Return fortify and expand recommendations for a Power."""
-    result = compute_recommendations(name, center_id, db)
+    resolved_ref_id = ref_id if ref_id is not None else center_id
+    result = compute_recommendations(name, resolved_ref_id, db)
     return RecommendationsResponse(**result)
 
 

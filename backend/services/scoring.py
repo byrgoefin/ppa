@@ -620,7 +620,7 @@ def compute_expand_scores(
 
 def compute_recommendations(
     power_name: str,
-    center_system_id64: Optional[int],
+    ref_system_id64: Optional[int],     # reference system (formerly center_system_id64)
     db: Session,
 ) -> dict:
     import os
@@ -639,9 +639,9 @@ def compute_recommendations(
 
     center_coords: Optional[tuple[float, float, float]] = None
     center_name:   Optional[str] = None
-    if center_system_id64 is not None:
+    if ref_system_id64 is not None:
         center_sys = db.query(PPSystem).filter(
-            PPSystem.system_id64 == center_system_id64
+            PPSystem.system_id64 == ref_system_id64
         ).first()
         if center_sys:
             center_coords = (center_sys.x or 0.0, center_sys.y or 0.0, center_sys.z or 0.0)

@@ -5,7 +5,8 @@ import { getRecommendations, RecommendationsResponse } from "../api/recommendati
 import { useSelectionState } from "../hooks/useSelectionState";
 import { ppStateColor, PP_STATE_LABELS, PP_STATES_ORDERED } from "../constants/ppColors";
 import PowerSelector from "../components/PowerSelector";
-import CenterSystemSelector from "../components/CenterSystemSelector";
+import RefSystemSelector from "../components/RefSystemSelector";
+import SystemListInput from "../components/SystemListInput";
 import LayoutModeSelector, { LayoutMode } from "../components/LayoutModeSelector";
 
 type Axis = "xz" | "xy" | "yz";
@@ -101,7 +102,7 @@ function FilterSlider({
 interface TooltipData { x: number; y: number; system: PPSystemEntry; recoType: "fortify" | "expand" | null; }
 
 export default function Map2DView() {
-  const { powerName, centerSystem, setPower, setCenter } = useSelectionState();
+  const { powerName, refSystem, systemList, setPower, setRef, setSystemList } = useSelectionState();
   const [systems, setSystems] = useState<PPSystemEntry[]>([]);
   const [recommendations, setRecommendations] = useState<RecommendationsResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -110,7 +111,7 @@ export default function Map2DView() {
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
 
   // ── Two separate filter sliders ────────────────────────────────────────────
-  // Slider 1: Max distance from center (LY). Only active when a center is set.
+  // Slider 1: Max distance from reference system (LY). Only active when a ref is set.
   const [maxDistLY, setMaxDistLY] = useState<number>(500);
   // Slider 2: Min undermine ratio threshold (%). Show systems at or above this threat.
   const [minThreatPct, setMinThreatPct] = useState<number>(0);
@@ -128,25 +129,29 @@ export default function Map2DView() {
     if (!powerName) { setSystems([]); setRecommendations(null); return; }
     setLoading(true);
     Promise.all([
-      getPowerSystems(powerName, centerSystem?.id),
-      getRecommendations(powerName, centerSystem?.id),
+      getPowerSystems(powerName, refSystem?.id),
+      getRecommendations(powerName, refSystem?.id),
     ])
       .then(([sys, recs]) => { setSystems(sys); setRecommendations(recs); })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [powerName, centerSystem?.id]);
+  }, [powerName, refSystem?.id]);
 
   const centerIdx = useMemo(() => {
-    if (!centerSystem) return null;
-    const i = systems.findIndex((s) => s.system_id64 === centerSystem.id);
+    if (!refSystem) return null;
+    const i = systems.findIndex((s) => s.system_id64 === refSystem.id);
     return i >= 0 ? i : null;
-  }, [systems, centerSystem?.id]);
+  }, [systems, refSystem?.id]);
 
   // Apply filters before building positions
   const filteredSystems = useMemo(() => {
-    return systems.filter((s) => {
-      // Distance filter (only when center selected)
-      if (centerSystem && maxDistLY < 500) {
+    // System list filter takes precedence if active
+    const base = systemList.length > 0
+      ? systems.filter(s => systemList.some(n => n.toLowerCase() === s.name.toLowerCase()))
+      : systems;
+    return base.filter((s) => {
+      // Distance filter (only when ref selected)
+      if (refSystem && maxDistLY < 500) {
         const dist = s.distance_from_center;
         if (dist != null && dist > maxDistLY) return false;
       }
@@ -194,7 +199,8 @@ export default function Map2DView() {
       {/* Row 1: Controls */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
         <PowerSelector value={powerName} onChange={setPower} />
-        <CenterSystemSelector value={centerSystem} onChange={setCenter} />
+        <RefSystemSelector value={refSystem} onChange={setRef} />
+        <SystemListInput value={systemList} onChange={setSystemList} powerName={powerName} />
         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "#57606a" }}>Axis:</span>
           {(["xz", "xy", "yz"] as Axis[]).map((a) => (
@@ -210,12 +216,12 @@ export default function Map2DView() {
       {/* Row 2: Two separate filter sliders */}
       <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 10, padding: "10px 14px", background: "#161b22", borderRadius: 8, border: "1px solid #30363d" }}>
         <FilterSlider
-          label="Max Distance from Center (LY)"
+          label="Max Distance from Reference (LY)"
           value={maxDistLY}
           min={10} max={500} step={10}
           unit=" LY"
           onChange={setMaxDistLY}
-          disabled={!centerSystem}
+          disabled={!refSystem}
         />
         <FilterSlider
           label="Min Threat Level (Undermine %)"
@@ -252,7 +258,9 @@ export default function Map2DView() {
         </span>
         {systems.length > 0 && (
           <span style={{ fontSize: 11, color: "#57606a", marginLeft: "auto" }}>
-            {filteredSystems.length} / {systems.length} systems shown
+            {systemList.length > 0
+              ? `${filteredSystems.length} of ${systemList.length} listed (${systems.length} total)`
+              : `${filteredSystems.length} / ${systems.length} systems shown`}
           </span>
         )}
       </div>
@@ -266,7 +274,7 @@ export default function Map2DView() {
               if (!p) return null;
               const cx2 = scaleX(p[0]);
               const cy2 = scaleY(p[1]);
-              const isCenter = sys.system_id64 === centerSystem?.id;
+              const isCenter = sys.system_id64 === refSystem?.id;
               const reco = recoType(sys.name);
               const color = ppStateColor(sys.power_state);
               const r = 6;

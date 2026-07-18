@@ -35,10 +35,10 @@ export async function searchPowers(q: string): Promise<string[]> {
 
 export async function getPowerSystems(
   powerName: string,
-  centerSystemId64?: number,
+  refSystemId64?: number,
 ): Promise<PPSystemEntry[]> {
   const params = new URLSearchParams();
-  if (centerSystemId64 != null) params.set("center_id", String(centerSystemId64));
+  if (refSystemId64 != null) params.set("ref_id", String(refSystemId64));
   const qs = params.size > 0 ? `?${params.toString()}` : "";
   const res = await fetch(`/api/powers/${encodeURIComponent(powerName)}/systems${qs}`);
   if (!res.ok) throw new Error(`Get power systems failed (${res.status})`);

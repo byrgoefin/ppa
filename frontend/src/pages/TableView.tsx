@@ -4,7 +4,8 @@ import { getRecommendations, RecommendationsResponse, RecommendationItem } from 
 import { useSelectionState } from "../hooks/useSelectionState";
 import { ppStateColor, PP_STATE_LABELS } from "../constants/ppColors";
 import PowerSelector from "../components/PowerSelector";
-import CenterSystemSelector from "../components/CenterSystemSelector";
+import RefSystemSelector from "../components/RefSystemSelector";
+import SystemListInput from "../components/SystemListInput";
 import RecommendationPanel from "../components/RecommendationPanel";
 
 type SortDir = "asc" | "desc";
@@ -134,7 +135,7 @@ function Th({ col, label, sortKey, sortDir, onSort, width, title }: {
 // ── Main component ─────────────────────────────────────────────────────────
 
 export default function TableView() {
-  const { powerName, centerSystem, setPower, setCenter } = useSelectionState();
+  const { powerName, refSystem, systemList, setPower, setRef, setSystemList } = useSelectionState();
 
   const [systems,         setSystems]         = useState<PPSystemEntry[]>([]);
   const [recommendations, setRecommendations] = useState<RecommendationsResponse | null>(null);
@@ -165,35 +166,42 @@ export default function TableView() {
   useEffect(() => {
     if (!powerName) { setSystems([]); setRecommendations(null); return; }
     setLoadingSystems(true); setError(null);
-    getPowerSystems(powerName, centerSystem?.id)
+    getPowerSystems(powerName, refSystem?.id)
       .then(setSystems)
       .catch(e => setError(String(e)))
       .finally(() => setLoadingSystems(false));
-  }, [powerName, centerSystem?.id]);
+  }, [powerName, refSystem?.id]);
 
   useEffect(() => {
     if (!powerName) { setRecommendations(null); return; }
     setLoadingRecos(true);
-    getRecommendations(powerName, centerSystem?.id)
+    getRecommendations(powerName, refSystem?.id)
       .then(setRecommendations)
       .catch(() => setRecommendations(null))
       .finally(() => setLoadingRecos(false));
-  }, [powerName, centerSystem?.id]);
+  }, [powerName, refSystem?.id]);
 
-  // Default sort: by control_progress ascending (most at-risk first) when no center;
-  // by distance ascending when a center is selected.
+  // Default sort: by control_progress ascending (most at-risk first) when no ref;
+  // by distance ascending when a reference system is selected.
   useEffect(() => {
-    setSortKey(centerSystem ? "distance_from_center" : "control_progress");
+    setSortKey(refSystem ? "distance_from_center" : "control_progress");
     setSortDir("asc");
-  }, [centerSystem?.id]);
+  }, [refSystem?.id]);
 
   function handleSort(col: string) {
     if (col === sortKey) setSortDir(d => d === "asc" ? "desc" : "asc");
     else { setSortKey(col); setSortDir("asc"); }
   }
 
+  // Apply system list filter if active
+  const displaySystems = useMemo(() => {
+    if (systemList.length === 0) return systems;
+    const nameSet = new Set(systemList.map(n => n.toLowerCase()));
+    return systems.filter(s => nameSet.has(s.name.toLowerCase()));
+  }, [systems, systemList]);
+
   const sorted = useMemo(() => {
-    return [...systems].sort((a, b) => {
+    return [...displaySystems].sort((a, b) => {
       if (sortKey === "recommendation") {
         return cmp(getRecoType(a.name), getRecoType(b.name), sortDir);
       }
@@ -211,7 +219,7 @@ export default function TableView() {
     });
   }, [systems, sortKey, sortDir, fortifyMap, expandSet]);
 
-  const showDist = !!centerSystem;
+  const showDist = !!refSystem;
 
   return (
     <div style={{
@@ -221,14 +229,17 @@ export default function TableView() {
       {/* Controls */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
         <PowerSelector value={powerName} onChange={setPower} />
-        <CenterSystemSelector value={centerSystem} onChange={setCenter} />
+        <RefSystemSelector value={refSystem} onChange={setRef} />
+        <SystemListInput value={systemList} onChange={setSystemList} powerName={powerName} />
         {loadingSystems && <span style={{ fontSize: 13, color: "#8b949e" }}>Loading systems…</span>}
         {error && <span style={{ fontSize: 13, color: "#D94A4A" }}>{error}</span>}
         {systems.length > 0 && !loadingSystems && (
           <span style={{ fontSize: 12, color: "#8b949e", marginLeft: "auto" }}>
-            {systems.length} system{systems.length !== 1 ? "s" : ""}
+            {systemList.length > 0
+              ? `${displaySystems.length} of ${systems.length} systems (filtered)`
+              : `${systems.length} system${systems.length !== 1 ? "s" : ""}`}
             {powerName && ` · ${powerName}`}
-            {centerSystem && ` · centered on ${centerSystem.name}`}
+            {refSystem && ` · ref: ${refSystem.name}`}
           </span>
         )}
       </div>
@@ -247,9 +258,14 @@ export default function TableView() {
           No systems found. Run a Spansh PP ingest from the Admin panel first.
         </p>
       )}
+      {powerName && !loadingSystems && systems.length > 0 && displaySystems.length === 0 && systemList.length > 0 && (
+        <p style={{ color: "#8b949e", fontSize: 14, marginTop: 8 }}>
+          None of the {systemList.length} system{systemList.length !== 1 ? "s" : ""} in your list were found under {powerName}. Check names or clear the filter.
+        </p>
+      )}
 
       {/* Table */}
-      {systems.length > 0 && (
+      {displaySystems.length > 0 && (
         <div style={{ overflowX: "auto", borderRadius: 8, border: "1px solid #30363d", marginTop: 4 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
@@ -274,6 +290,7 @@ export default function TableView() {
             </thead>
             <tbody>
               {sorted.map((sys, i) => {
+                // Highlight if in system list
                 const reco     = getRecoType(sys.name);
                 const recoItem = reco === "fortify" ? fortifyMap.get(sys.name) ?? null
                                : null;

@@ -7,7 +7,8 @@ import { getRecommendations, RecommendationsResponse } from "../api/recommendati
 import { useSelectionState } from "../hooks/useSelectionState";
 import { ppStateColor, PP_STATE_LABELS, PP_STATES_ORDERED } from "../constants/ppColors";
 import PowerSelector from "../components/PowerSelector";
-import CenterSystemSelector from "../components/CenterSystemSelector";
+import RefSystemSelector from "../components/RefSystemSelector";
+import SystemListInput from "../components/SystemListInput";
 import LayoutModeSelector, { LayoutMode } from "../components/LayoutModeSelector";
 
 function normalizeCoords(systems: PPSystemEntry[], mode: LayoutMode, center: PPSystemEntry | null): Map<number, THREE.Vector3> {
@@ -177,7 +178,7 @@ function Scene({ systems, positions, fortifySet, expandSet, centerSystemId, onHo
 }
 
 export default function Map3DView() {
-  const { powerName, centerSystem, setPower, setCenter } = useSelectionState();
+  const { powerName, refSystem, systemList, setPower, setRef, setSystemList } = useSelectionState();
   const [systems, setSystems] = useState<PPSystemEntry[]>([]);
   const [recommendations, setRecommendations] = useState<RecommendationsResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -194,21 +195,25 @@ export default function Map3DView() {
     if (!powerName) { setSystems([]); setRecommendations(null); return; }
     setLoading(true);
     Promise.all([
-      getPowerSystems(powerName, centerSystem?.id),
-      getRecommendations(powerName, centerSystem?.id),
+      getPowerSystems(powerName, refSystem?.id),
+      getRecommendations(powerName, refSystem?.id),
     ])
       .then(([sys, recs]) => { setSystems(sys); setRecommendations(recs); })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [powerName, centerSystem?.id]);
+  }, [powerName, refSystem?.id]);
 
-  const centerObj = useMemo(() => systems.find((s) => s.system_id64 === centerSystem?.id) ?? null, [systems, centerSystem?.id]);
+  const centerObj = useMemo(() => systems.find((s) => s.system_id64 === refSystem?.id) ?? null, [systems, refSystem?.id]);
 
   // Apply filters before rendering
   const filteredSystems = useMemo(() => {
-    return systems.filter((s) => {
-      // Distance filter (only when center is set)
-      if (centerSystem && maxDistLY < 500) {
+    // System list filter takes precedence if active
+    const base = systemList.length > 0
+      ? systems.filter(s => systemList.some(n => n.toLowerCase() === s.name.toLowerCase()))
+      : systems;
+    return base.filter((s) => {
+      // Distance filter (only when ref is set)
+      if (refSystem && maxDistLY < 500) {
         const dist = s.distance_from_center;
         if (dist != null && dist > maxDistLY) return false;
       }
@@ -232,7 +237,8 @@ export default function Map3DView() {
       {/* Row 1: Controls */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", padding: "12px 20px", borderBottom: "1px solid #30363d" }}>
         <PowerSelector value={powerName} onChange={setPower} />
-        <CenterSystemSelector value={centerSystem} onChange={setCenter} />
+        <RefSystemSelector value={refSystem} onChange={setRef} />
+        <SystemListInput value={systemList} onChange={setSystemList} powerName={powerName} />
         <LayoutModeSelector value={layoutMode} onChange={setLayoutMode} />
         {loading && <span style={{ fontSize: 13, color: "#8b949e" }}>Loading…</span>}
         {systems.length > 0 && !loading && (
@@ -245,12 +251,12 @@ export default function Map3DView() {
       {/* Row 2: Two separate filter sliders */}
       <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-end", padding: "10px 20px", background: "#161b22", borderBottom: "1px solid #21262d" }}>
         <FilterSlider
-          label="Max Distance from Center (LY)"
+          label="Max Distance from Reference (LY)"
           value={maxDistLY}
           min={10} max={500} step={10}
           unit=" LY"
           onChange={setMaxDistLY}
-          disabled={!centerSystem}
+          disabled={!refSystem}
         />
         <FilterSlider
           label="Min Threat Level (Undermine %)"
@@ -291,7 +297,7 @@ export default function Map3DView() {
         <div style={{ height: "calc(100vh - 175px)", background: "#030310" }}>
           <Canvas camera={{ position: [0, 30, 80], fov: 60 }}>
             <Scene systems={filteredSystems} positions={positions} fortifySet={fortifySet} expandSet={expandSet}
-              centerSystemId={centerSystem?.id} onHover={setHoveredSystem} />
+              centerSystemId={refSystem?.id} onHover={setHoveredSystem} />
           </Canvas>
         </div>
       ) : (
