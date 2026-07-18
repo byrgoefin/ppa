@@ -49,31 +49,31 @@ async function apiPatch(path: string, body: unknown) {
 
 // ── Default scoring weights ───────────────────────────────────────────────────
 const DEFAULT_WEIGHTS: Record<string, number> = {
-  fortify_undermined: 50,
-  fortify_turmoil: 40,
-  fortify_low_influence: 20,
-  fortify_trend_down: 15,
-  fortify_not_controlling: 25,
-  fortify_near_center: 10,
-  expand_uncontrolled: 40,
-  expand_proximity: 20,
-  expand_pp_state: 30,
-  expand_allegiance_gap: 10,
-  expand_low_competition: 15,
+  fortify_turmoil:         60,
+  fortify_undermined:      50,
+  fortify_contested:       30,
+  fortify_high_ratio:      40,
+  fortify_trend_worsening: 20,
+  fortify_near_center:     10,
+  expand_in_prepare:       50,
+  expand_expansion_state:  40,
+  expand_no_controller:    30,
+  expand_proximity:        20,
+  expand_allegiance_match: 15,
 };
 
 const WEIGHT_LABELS: Record<string, string> = {
-  fortify_undermined: "Fortify — Undermined state",
-  fortify_turmoil: "Fortify — Turmoil state",
-  fortify_low_influence: "Fortify — Low influence (<40%)",
-  fortify_trend_down: "Fortify — Declining influence",
-  fortify_not_controlling: "Fortify — Not controlling system",
-  fortify_near_center: "Fortify — Near center system (<15 LY)",
-  expand_uncontrolled: "Expand — No controlling faction",
-  expand_proximity: "Expand — Close to controlled system (<20 LY)",
-  expand_pp_state: "Expand — Expansion / InPrepareRadius state",
-  expand_allegiance_gap: "Expand — No same-allegiance competitor",
-  expand_low_competition: "Expand — Low faction count (<3)",
+  fortify_turmoil:         "Fortify — Turmoil (system at risk of loss)",
+  fortify_undermined:      "Fortify — Undermined state",
+  fortify_contested:       "Fortify — Contested state",
+  fortify_high_ratio:      "Fortify — High undermine ratio (>50%)",
+  fortify_trend_worsening: "Fortify — Undermining pressure increasing",
+  fortify_near_center:     "Fortify — Near center system (<15 LY)",
+  expand_in_prepare:       "Expand — InPrepareRadius state",
+  expand_expansion_state:  "Expand — Active Expansion state",
+  expand_no_controller:    "Expand — No power controls system",
+  expand_proximity:        "Expand — Close to controlled system (<20 LY)",
+  expand_allegiance_match: "Expand — Allegiance matches power",
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────

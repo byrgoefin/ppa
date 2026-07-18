@@ -1,15 +1,17 @@
 /** Recommendations API client. */
 
 export interface RecommendationItem {
-  system_name: string;
   system_id64: number;
+  system_name: string;
   score: number;
   type: "fortify" | "expand";
   reasons: string[];
+  power_state: string | null;
+  reinforcement: number | null;
+  undermining: number | null;
+  undermine_ratio: number | null;
   distance_from_center: number | null;
-  pp_state: string | null;
-  influence: number | null;
-  influence_trend: "rising" | "falling" | "stable" | "unknown";
+  threat_trend: "worsening" | "improving" | "stable" | "unknown";
 }
 
 export interface RecommendationsResponse {
@@ -19,16 +21,14 @@ export interface RecommendationsResponse {
 }
 
 export async function getRecommendations(
-  factionName: string,
-  centerSystemId64?: number
+  powerName: string,
+  centerSystemId64?: number,
 ): Promise<RecommendationsResponse> {
   const params = new URLSearchParams();
-  if (centerSystemId64 != null) {
-    params.set("center_id", String(centerSystemId64));
-  }
+  if (centerSystemId64 != null) params.set("center_id", String(centerSystemId64));
   const qs = params.toString() ? `?${params.toString()}` : "";
   const res = await fetch(
-    `/api/factions/${encodeURIComponent(factionName)}/recommendations${qs}`
+    `/api/powers/${encodeURIComponent(powerName)}/recommendations${qs}`
   );
   if (!res.ok) throw new Error(`Get recommendations failed (${res.status})`);
   return res.json() as Promise<RecommendationsResponse>;

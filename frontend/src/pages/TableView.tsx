@@ -1,165 +1,136 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { getFactionSystems, FactionSystemEntry } from "../api/factions";
+import { getPowerSystems, PPSystemEntry } from "../api/powers";
 import { getRecommendations, RecommendationsResponse } from "../api/recommendations";
 import { useSelectionState } from "../hooks/useSelectionState";
-import { ppStateColor } from "../constants/ppColors";
-import FactionSelector from "../components/FactionSelector";
+import { ppStateColor, PP_STATE_LABELS } from "../constants/ppColors";
+import PowerSelector from "../components/PowerSelector";
 import CenterSystemSelector from "../components/CenterSystemSelector";
 import RecommendationPanel from "../components/RecommendationPanel";
 
-// ── Sorting helpers ─────────────────────────────────────────────────────────
-type SortKey = "system_name" | "is_controlling" | "pp_state" | "pp_power" | "influence" | "distance_from_center" | "recommendation";
+type SortKey = keyof PPSystemEntry | "recommendation";
 type SortDir = "asc" | "desc";
 
 function cmp(a: unknown, b: unknown, dir: SortDir): number {
-  const factor = dir === "asc" ? 1 : -1;
+  const f = dir === "asc" ? 1 : -1;
   if (a == null && b == null) return 0;
-  if (a == null) return factor;
-  if (b == null) return -factor;
-  if (typeof a === "string" && typeof b === "string") return factor * a.localeCompare(b);
-  if (typeof a === "number" && typeof b === "number") return factor * (a - b);
-  if (typeof a === "boolean" && typeof b === "boolean") return factor * (a === b ? 0 : a ? -1 : 1);
+  if (a == null) return f;
+  if (b == null) return -f;
+  if (typeof a === "string" && typeof b === "string") return f * a.localeCompare(b);
+  if (typeof a === "number" && typeof b === "number") return f * (a - b);
   return 0;
 }
 
-// ── Small display components ─────────────────────────────────────────────────
 function PPBadge({ state }: { state: string | null }) {
   if (!state) return <span style={{ color: "#999" }}>—</span>;
   return (
     <span style={{ background: ppStateColor(state), color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, fontWeight: 600 }}>
-      {state}
+      {PP_STATE_LABELS[state] ?? state}
     </span>
   );
 }
 
 function RecoBadge({ type }: { type: "fortify" | "expand" | null }) {
   if (!type) return null;
-  const bg = type === "fortify" ? "#D94A4A" : "#3b82d4";
-  const label = type === "fortify" ? "Fortify" : "Expand";
   return (
-    <span style={{ background: bg, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, fontWeight: 600 }}>
-      {label}
+    <span style={{ background: type === "fortify" ? "#D94A4A" : "#3b82d4", color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, fontWeight: 600 }}>
+      {type === "fortify" ? "Fortify" : "Expand"}
     </span>
   );
 }
 
-function TrendArrow({ trend }: { trend: string }) {
-  if (trend === "rising") return <span style={{ color: "#4AD94A" }}>↑</span>;
-  if (trend === "falling") return <span style={{ color: "#D94A4A" }}>↓</span>;
+function ThreatArrow({ trend }: { trend: string }) {
+  if (trend === "worsening") return <span style={{ color: "#D94A4A" }} title="Undermining increasing">↑</span>;
+  if (trend === "improving") return <span style={{ color: "#4AD94A" }} title="Undermining decreasing">↓</span>;
   return <span style={{ color: "#999" }}>—</span>;
 }
 
-function SortIndicator({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; sortDir: SortDir }) {
-  if (col !== sortKey) return <span style={{ color: "#ccc", marginLeft: 4 }}>↕</span>;
-  return <span style={{ marginLeft: 4 }}>{sortDir === "asc" ? "↑" : "↓"}</span>;
-}
-
-// ── Column header ────────────────────────────────────────────────────────────
 function Th({ col, label, sortKey, sortDir, onSort, width }: {
-  col: SortKey; label: string; sortKey: SortKey; sortDir: SortDir;
-  onSort: (k: SortKey) => void; width?: number;
+  col: string; label: string; sortKey: string; sortDir: SortDir;
+  onSort: (k: string) => void; width?: number;
 }) {
+  const active = col === sortKey;
   return (
-    <th
-      onClick={() => onSort(col)}
-      style={{ padding: "10px 12px", textAlign: "left", fontSize: 12, fontWeight: 700, color: "#57606a", textTransform: "uppercase", letterSpacing: "0.04em", cursor: "pointer", whiteSpace: "nowrap", background: "#f7f8fa", borderBottom: "2px solid #e5e7eb", width }}
-    >
-      {label}<SortIndicator col={col} sortKey={sortKey} sortDir={sortDir} />
+    <th onClick={() => onSort(col)} style={{ padding: "10px 12px", textAlign: "left", fontSize: 12, fontWeight: 700, color: "#57606a", textTransform: "uppercase", letterSpacing: "0.04em", cursor: "pointer", whiteSpace: "nowrap", background: "#f7f8fa", borderBottom: "2px solid #e5e7eb", width }}>
+      {label}
+      <span style={{ marginLeft: 4, color: active ? "#1f2328" : "#ccc" }}>{active ? (sortDir === "asc" ? "↑" : "↓") : "↕"}</span>
     </th>
   );
 }
 
-// ── Main component ───────────────────────────────────────────────────────────
 export default function TableView() {
-  const { factionName, centerSystem, setFaction, setCenter } = useSelectionState();
+  const { powerName, centerSystem, setPower, setCenter } = useSelectionState();
 
-  const [systems, setSystems] = useState<FactionSystemEntry[]>([]);
+  const [systems, setSystems] = useState<PPSystemEntry[]>([]);
   const [recommendations, setRecommendations] = useState<RecommendationsResponse | null>(null);
   const [loadingSystems, setLoadingSystems] = useState(false);
   const [loadingRecos, setLoadingRecos] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Default sort: distance asc when center is selected, else system name asc
-  const [sortKey, setSortKey] = useState<SortKey>("system_name");
+  const [sortKey, setSortKey] = useState<string>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
-  // Build sets for O(1) recommendation lookup
   const fortifySet = useMemo(() => new Set((recommendations?.fortify ?? []).map((r) => r.system_name)), [recommendations]);
-  const expandSet = useMemo(() => new Set((recommendations?.expand ?? []).map((r) => r.system_name)), [recommendations]);
+  const expandSet  = useMemo(() => new Set((recommendations?.expand  ?? []).map((r) => r.system_name)), [recommendations]);
 
   function getRecoType(name: string): "fortify" | "expand" | null {
     if (fortifySet.has(name)) return "fortify";
-    if (expandSet.has(name)) return "expand";
+    if (expandSet.has(name))  return "expand";
     return null;
   }
 
-  // Fetch systems whenever faction or center changes
   useEffect(() => {
-    if (!factionName) { setSystems([]); setRecommendations(null); return; }
+    if (!powerName) { setSystems([]); setRecommendations(null); return; }
     setLoadingSystems(true);
     setError(null);
-    getFactionSystems(factionName, centerSystem?.id)
+    getPowerSystems(powerName, centerSystem?.id)
       .then(setSystems)
       .catch((e) => setError(String(e)))
       .finally(() => setLoadingSystems(false));
-  }, [factionName, centerSystem?.id]);
+  }, [powerName, centerSystem?.id]);
 
-  // Fetch recommendations separately
   useEffect(() => {
-    if (!factionName) { setRecommendations(null); return; }
+    if (!powerName) { setRecommendations(null); return; }
     setLoadingRecos(true);
-    getRecommendations(factionName, centerSystem?.id)
+    getRecommendations(powerName, centerSystem?.id)
       .then(setRecommendations)
       .catch(() => setRecommendations(null))
       .finally(() => setLoadingRecos(false));
-  }, [factionName, centerSystem?.id]);
+  }, [powerName, centerSystem?.id]);
 
-  // Default sort key change based on whether center is selected
   useEffect(() => {
-    setSortKey(centerSystem ? "distance_from_center" : "system_name");
+    setSortKey(centerSystem ? "distance_from_center" : "name");
     setSortDir("asc");
   }, [centerSystem?.id]);
 
-  function handleSort(col: SortKey) {
+  function handleSort(col: string) {
     if (col === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else { setSortKey(col); setSortDir("asc"); }
   }
 
-  // Sort rows
-  const sorted = useMemo(() => {
-    return [...systems].sort((a, b) => {
-      if (sortKey === "recommendation") {
-        const rA = getRecoType(a.system_name);
-        const rB = getRecoType(b.system_name);
-        return cmp(rA, rB, sortDir);
-      }
-      return cmp(a[sortKey as keyof FactionSystemEntry], b[sortKey as keyof FactionSystemEntry], sortDir);
-    });
-  }, [systems, sortKey, sortDir, fortifySet, expandSet]);
+  const sorted = useMemo(() => [...systems].sort((a, b) => {
+    if (sortKey === "recommendation") {
+      return cmp(getRecoType(a.name), getRecoType(b.name), sortDir);
+    }
+    return cmp((a as Record<string, unknown>)[sortKey], (b as Record<string, unknown>)[sortKey], sortDir);
+  }), [systems, sortKey, sortDir, fortifySet, expandSet]);
 
   const showDistance = !!centerSystem;
 
   return (
-    <div style={{ padding: "20px 24px", fontFamily: '-apple-system, "Segoe UI", system-ui, sans-serif', color: "#1f2328" }}>
-      {/* Selectors row */}
+    <div style={{ padding: "20px 24px", fontFamily: '-apple-system,"Segoe UI",system-ui,sans-serif', color: "#1f2328" }}>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
-        <FactionSelector value={factionName} onChange={setFaction} />
+        <PowerSelector value={powerName} onChange={setPower} />
         <CenterSystemSelector value={centerSystem} onChange={setCenter} />
         {loadingSystems && <span style={{ fontSize: 13, color: "#57606a" }}>Loading…</span>}
         {error && <span style={{ fontSize: 13, color: "#D94A4A" }}>{error}</span>}
       </div>
 
-      {/* Recommendation panel */}
       <RecommendationPanel recommendations={recommendations} loading={loadingRecos} />
 
-      {/* Empty state */}
-      {!factionName && (
-        <p style={{ color: "#57606a", fontSize: 14, marginTop: 24 }}>Search for a faction above to populate the table.</p>
+      {!powerName && (
+        <p style={{ color: "#57606a", fontSize: 14, marginTop: 24 }}>Search for a Power above to populate the table.</p>
       )}
-
-      {/* Table */}
-      {factionName && !loadingSystems && systems.length === 0 && (
-        <p style={{ color: "#57606a", fontSize: 14, marginTop: 8 }}>No systems found for this faction. Data may not have been ingested yet.</p>
+      {powerName && !loadingSystems && systems.length === 0 && (
+        <p style={{ color: "#57606a", fontSize: 14, marginTop: 8 }}>No systems found. Run a Spansh PP ingest first.</p>
       )}
 
       {systems.length > 0 && (
@@ -167,46 +138,45 @@ export default function TableView() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr>
-                <Th col="system_name" label="System" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
-                <Th col="is_controlling" label="Controls?" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={90} />
-                <Th col="pp_state" label="PP State" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
-                <Th col="pp_power" label="PP Power" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
-                <Th col="influence" label="Influence" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={100} />
-                <Th col="influence" label="Trend" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={70} />
+                <Th col="name"             label="System"         sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                <Th col="power_state"      label="PP State"       sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                <Th col="reinforcement"    label="Reinforcement"  sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={120} />
+                <Th col="undermining"      label="Undermining"    sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={110} />
+                <Th col="undermine_ratio"  label="Threat %"       sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={90} />
+                <Th col="undermine_ratio"  label="Trend"          sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={65} />
                 {showDistance && <Th col="distance_from_center" label="Distance (LY)" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={120} />}
-                <Th col="recommendation" label="Action" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={100} />
+                <Th col="recommendation"   label="Action"         sortKey={sortKey} sortDir={sortDir} onSort={handleSort} width={100} />
               </tr>
             </thead>
             <tbody>
               {sorted.map((sys, i) => {
-                const reco = getRecoType(sys.system_name);
+                const reco = getRecoType(sys.name);
                 const recoItem = reco === "fortify"
-                  ? recommendations?.fortify.find((r) => r.system_name === sys.system_name)
+                  ? recommendations?.fortify.find((r) => r.system_name === sys.name)
                   : reco === "expand"
-                  ? recommendations?.expand.find((r) => r.system_name === sys.system_name)
+                  ? recommendations?.expand.find((r) => r.system_name === sys.name)
                   : null;
                 return (
                   <tr key={sys.system_id64} style={{ background: i % 2 === 0 ? "#fff" : "#f7f8fa" }}>
                     <td style={{ padding: "9px 12px", fontWeight: 500 }}>
-                      <a
-                        href={`https://www.edsm.net/en/system/id/-/name/${encodeURIComponent(sys.system_name)}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ color: "#3b82d4", textDecoration: "none" }}
-                      >
-                        {sys.system_name}
+                      <a href={`https://www.edsm.net/en/system/id/-/name/${encodeURIComponent(sys.name)}`}
+                        target="_blank" rel="noreferrer"
+                        style={{ color: "#3b82d4", textDecoration: "none" }}>
+                        {sys.name}
                       </a>
                     </td>
-                    <td style={{ padding: "9px 12px", textAlign: "center" }}>
-                      {sys.is_controlling ? <span style={{ color: "#4AD94A", fontWeight: 700 }}>✓</span> : <span style={{ color: "#ccc" }}>—</span>}
+                    <td style={{ padding: "9px 12px" }}><PPBadge state={sys.power_state} /></td>
+                    <td style={{ padding: "9px 12px", textAlign: "right" }}>
+                      {sys.reinforcement != null ? sys.reinforcement.toLocaleString() : "—"}
                     </td>
-                    <td style={{ padding: "9px 12px" }}><PPBadge state={sys.pp_state} /></td>
-                    <td style={{ padding: "9px 12px", color: "#57606a" }}>{sys.pp_power ?? "—"}</td>
-                    <td style={{ padding: "9px 12px" }}>
-                      {sys.influence != null ? `${(sys.influence * 100).toFixed(1)}%` : "—"}
+                    <td style={{ padding: "9px 12px", textAlign: "right", color: sys.undermining ? "#D94A4A" : undefined }}>
+                      {sys.undermining != null ? sys.undermining.toLocaleString() : "—"}
+                    </td>
+                    <td style={{ padding: "9px 12px", textAlign: "right" }}>
+                      {sys.undermine_ratio != null ? `${(sys.undermine_ratio * 100).toFixed(0)}%` : "—"}
                     </td>
                     <td style={{ padding: "9px 12px", textAlign: "center" }}>
-                      <TrendArrow trend={recoItem?.influence_trend ?? "unknown"} />
+                      <ThreatArrow trend={recoItem?.threat_trend ?? "unknown"} />
                     </td>
                     {showDistance && (
                       <td style={{ padding: "9px 12px", textAlign: "right" }}>
@@ -221,7 +191,7 @@ export default function TableView() {
           </table>
           <div style={{ padding: "8px 12px", fontSize: 12, color: "#57606a", borderTop: "1px solid #e5e7eb", background: "#f7f8fa" }}>
             {sorted.length} system{sorted.length !== 1 ? "s" : ""}
-            {factionName && ` · ${factionName}`}
+            {powerName && ` · ${powerName}`}
             {centerSystem && ` · centered on ${centerSystem.name}`}
           </div>
         </div>

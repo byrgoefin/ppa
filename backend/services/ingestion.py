@@ -1,7 +1,22 @@
-"""Spansh factions.json.gz streaming ingestion service.
+"""Spansh Power Play bulk ingestion service.
 
-Downloads and parses the Spansh bulk faction dump on-the-fly using ijson so
-the full (potentially hundreds-of-MB) file is never held in RAM.
+Downloads powerplay.json.gz from Spansh and inserts a time-stamped snapshot
+row for every system in the file.  Systems themselves are upserted so their
+coordinates and allegiance stay current.
+
+Schema of each object in the Spansh powerplay.json.gz array:
+{
+  "id64": 5031654888434,
+  "name": "Cubeo",
+  "x": 46.375, "y": -87.625, "z": -0.625,
+  "power": "Arissa Lavigny-Duval",
+  "powerState": "Fortified",
+  "powerStateControlProgress": 0.0,
+  "powerStateReinforcement": 12345,
+  "powerStateUndermining": 678,
+  "allegiance": "Empire",
+  "population": 22000000
+}
 """
 
 import gzip
@@ -17,45 +32,18 @@ from models.models import IngestionRun
 
 logger = logging.getLogger(__name__)
 
-SPANSH_URL = "https://downloads.spansh.co.uk/factions.json.gz"
-BATCH_COMMIT_SIZE = 1000
-
-
-def _deduplicate_systems(systems: list) -> list:
-    """Deduplicate a faction's systems list by systemId64.
-
-    The Spansh dump lists a system twice when the faction controls it — once
-    with isControllingFaction=true and once without.  Keep the controlling
-    entry when it exists; otherwise keep the first occurrence.
-    """
-    seen: dict[int, dict] = {}
-    for entry in systems:
-        sid = entry.get("systemId64")
-        if sid is None:
-            continue
-        if sid not in seen:
-            seen[sid] = entry
-        else:
-            # Prefer the entry where isControllingFaction is True
-            if entry.get("isControllingFaction", False):
-                seen[sid] = entry
-    return list(seen.values())
+SPANSH_PP_URL = "https://downloads.spansh.co.uk/powerplay.json.gz"
+BATCH_COMMIT_SIZE = 500
 
 
 def run_spansh_ingest(db: Session) -> IngestionRun:
-    """Stream-download and ingest the Spansh factions dump into PostgreSQL.
+    """Stream-download the Spansh powerplay dump and store PP snapshots.
 
-    Creates an IngestionRun audit row, processes every faction record via
-    ijson (one at a time), upserts factions/systems, inserts faction_presence
-    rows tied to this run, and updates the run status on completion or failure.
-
-    Returns the completed IngestionRun ORM object.
+    Creates an IngestionRun audit row, upserts pp_systems, inserts
+    pp_system_snapshots rows, and updates the run status on completion.
     """
-    # ------------------------------------------------------------------
-    # 1. Create the ingestion_run row so we have an ID to link against.
-    # ------------------------------------------------------------------
     run = IngestionRun(
-        source="spansh",
+        source="spansh_pp",
         status="running",
         started_at=datetime.utcnow(),
         records_processed=0,
@@ -64,143 +52,108 @@ def run_spansh_ingest(db: Session) -> IngestionRun:
     db.commit()
     db.refresh(run)
     run_id: int = run.id
+    logger.info("Spansh PP ingest started (run_id=%d)", run_id)
 
     records_processed = 0
 
     try:
-        # ------------------------------------------------------------------
-        # 2. Open the HTTPS stream and wrap with on-the-fly gzip decompression.
-        # ------------------------------------------------------------------
-        logger.info("Starting Spansh factions download from %s", SPANSH_URL)
-        response = requests.get(SPANSH_URL, stream=True, timeout=60)
+        logger.info("Downloading Spansh PP dump from %s", SPANSH_PP_URL)
+        response = requests.get(SPANSH_PP_URL, stream=True, timeout=120)
         response.raise_for_status()
-        # Required so urllib3 decompresses transfer-encoding automatically
-        # when we pass raw to GzipFile.
         response.raw.decode_content = True
         gzip_file = gzip.GzipFile(fileobj=response.raw, mode="rb")
 
-        # ------------------------------------------------------------------
-        # 3. Stream-parse with ijson — yields one faction dict at a time.
-        # ------------------------------------------------------------------
-        for faction_obj in ijson.items(gzip_file, "item"):
-            faction_name: str = faction_obj.get("name", "")
-            if not faction_name:
+        for system_obj in ijson.items(gzip_file, "item"):
+            system_id64: int | None = system_obj.get("id64")
+            if system_id64 is None:
                 continue
 
-            allegiance: str | None = faction_obj.get("allegiance")
-            government: str | None = faction_obj.get("government")
+            name: str = system_obj.get("name", "")
+            x: float | None = system_obj.get("x")
+            y: float | None = system_obj.get("y")
+            z: float | None = system_obj.get("z")
+            allegiance: str | None = system_obj.get("allegiance")
+            population: int | None = system_obj.get("population")
+            power: str | None = system_obj.get("power")
+            power_state: str | None = system_obj.get("powerState")
+            control_progress: float | None = system_obj.get("powerStateControlProgress")
+            reinforcement: int | None = system_obj.get("powerStateReinforcement")
+            undermining: int | None = system_obj.get("powerStateUndermining")
 
-            # ── Upsert faction ──────────────────────────────────────────
-            result = db.execute(
-                text(
-                    """
-                    INSERT INTO factions (name, allegiance, government)
-                    VALUES (:name, :allegiance, :government)
-                    ON CONFLICT (name) DO UPDATE
-                        SET allegiance = EXCLUDED.allegiance,
-                            government = EXCLUDED.government
+            # Upsert the system record (coordinates + allegiance may change)
+            sys_result = db.execute(
+                text("""
+                    INSERT INTO pp_systems (system_id64, name, x, y, z, allegiance, population)
+                    VALUES (:id64, :name, :x, :y, :z, :allegiance, :population)
+                    ON CONFLICT (system_id64) DO UPDATE
+                        SET name       = EXCLUDED.name,
+                            x          = EXCLUDED.x,
+                            y          = EXCLUDED.y,
+                            z          = EXCLUDED.z,
+                            allegiance = EXCLUDED.allegiance,
+                            population = EXCLUDED.population
                     RETURNING id
-                    """
-                ),
-                {"name": faction_name, "allegiance": allegiance, "government": government},
+                """),
+                {
+                    "id64": system_id64, "name": name,
+                    "x": x, "y": y, "z": z,
+                    "allegiance": allegiance, "population": population,
+                },
             )
-            faction_id: int = result.scalar_one()
+            system_db_id: int = sys_result.scalar_one()
 
-            # ── Deduplicate and process systems ─────────────────────────
-            raw_systems: list = faction_obj.get("systems", [])
-            deduped_systems = _deduplicate_systems(raw_systems)
-
-            for sys_entry in deduped_systems:
-                system_id64: int | None = sys_entry.get("systemId64")
-                if system_id64 is None:
-                    continue
-
-                system_name: str = sys_entry.get("name", "")
-                x: float | None = sys_entry.get("x")
-                y: float | None = sys_entry.get("y")
-                z: float | None = sys_entry.get("z")
-                is_controlling: bool = bool(sys_entry.get("isControllingFaction", False))
-
-                # Upsert system by system_id64
-                sys_result = db.execute(
-                    text(
-                        """
-                        INSERT INTO systems (system_id64, name, x, y, z)
-                        VALUES (:system_id64, :name, :x, :y, :z)
-                        ON CONFLICT (system_id64) DO UPDATE
-                            SET name = EXCLUDED.name,
-                                x    = EXCLUDED.x,
-                                y    = EXCLUDED.y,
-                                z    = EXCLUDED.z
-                        RETURNING id
-                        """
-                    ),
-                    {
-                        "system_id64": system_id64,
-                        "name": system_name,
-                        "x": x,
-                        "y": y,
-                        "z": z,
-                    },
-                )
-                system_id: int = sys_result.scalar_one()
-
-                # Insert faction_presence row (fresh per run; not upserted)
-                db.execute(
-                    text(
-                        """
-                        INSERT INTO faction_presence
-                            (faction_id, system_id, is_controlling, ingestion_run_id)
-                        VALUES (:faction_id, :system_id, :is_controlling, :run_id)
-                        """
-                    ),
-                    {
-                        "faction_id": faction_id,
-                        "system_id": system_id,
-                        "is_controlling": is_controlling,
-                        "run_id": run_id,
-                    },
-                )
+            # Insert a fresh snapshot row (never upsert — we want full history)
+            db.execute(
+                text("""
+                    INSERT INTO pp_system_snapshots
+                        (system_id, ingestion_run_id, snapshot_time,
+                         power, power_state, control_progress,
+                         reinforcement, undermining)
+                    VALUES
+                        (:system_id, :run_id, :now,
+                         :power, :power_state, :control_progress,
+                         :reinforcement, :undermining)
+                """),
+                {
+                    "system_id": system_db_id,
+                    "run_id": run_id,
+                    "now": datetime.utcnow(),
+                    "power": power,
+                    "power_state": power_state,
+                    "control_progress": control_progress,
+                    "reinforcement": reinforcement,
+                    "undermining": undermining,
+                },
+            )
 
             records_processed += 1
-
-            # Commit in batches to avoid a massive open transaction.
             if records_processed % BATCH_COMMIT_SIZE == 0:
                 db.commit()
-                logger.debug("Spansh ingest: %d factions processed", records_processed)
+                logger.debug("Spansh PP ingest: %d systems processed", records_processed)
 
-        # ------------------------------------------------------------------
-        # 4. Final commit + mark run as completed.
-        # ------------------------------------------------------------------
+        db.commit()
+
         db.execute(
-            text(
-                """
+            text("""
                 UPDATE ingestion_runs
-                SET status = 'completed',
-                    completed_at = :now,
-                    records_processed = :count
+                SET status = 'completed', completed_at = :now, records_processed = :count
                 WHERE id = :run_id
-                """
-            ),
+            """),
             {"now": datetime.utcnow(), "count": records_processed, "run_id": run_id},
         )
         db.commit()
         db.refresh(run)
         logger.info(
-            "Spansh ingest completed: %d factions processed (run_id=%d)",
-            records_processed,
-            run_id,
+            "Spansh PP ingest completed: %d systems (run_id=%d)",
+            records_processed, run_id,
         )
 
     except Exception:
-        # Mark run as failed; re-raise so the caller/scheduler can log it.
-        logger.exception("Spansh ingest failed (run_id=%d)", run_id)
+        logger.exception("Spansh PP ingest failed (run_id=%d)", run_id)
         try:
             db.execute(
-                text(
-                    "UPDATE ingestion_runs SET status = 'failed' WHERE id = :run_id"
-                ),
-                {"run_id": run_id},
+                text("UPDATE ingestion_runs SET status = 'failed' WHERE id = :id"),
+                {"id": run_id},
             )
             db.commit()
         except Exception:

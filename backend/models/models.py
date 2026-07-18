@@ -1,4 +1,9 @@
-"""SQLAlchemy ORM models for the Elite Dangerous Power Play Analyzer."""
+"""SQLAlchemy ORM models for the Elite Dangerous Power Play Analyzer.
+
+Data is sourced from the Spansh Power Play dump (powerplay.json.gz) which
+contains one entry per system that is currently under a Power's influence.
+Each sync run inserts a fresh snapshot row so historical trends accumulate.
+"""
 
 from datetime import datetime
 
@@ -19,131 +24,82 @@ from db.session import Base
 
 
 # ---------------------------------------------------------------------------
-# ingestion_runs — must be defined first (other tables FK into it)
+# ingestion_runs — audit log for each sync job
 # ---------------------------------------------------------------------------
 
 
 class IngestionRun(Base):
-    """Audit log entry for each Spansh or EDSM ingestion job."""
+    """Audit log entry for each Spansh Power Play ingestion job."""
 
     __tablename__ = "ingestion_runs"
 
     id = Column(Integer, primary_key=True, index=True)
-    # "spansh" or "edsm"
-    source = Column(String(32), nullable=False)
+    source = Column(String(32), nullable=False)          # "spansh_pp"
     started_at = Column(DateTime, default=func.now(), nullable=False)
     completed_at = Column(DateTime, nullable=True)
-    # "running" | "completed" | "failed"
-    status = Column(String(16), nullable=False, default="running")
+    status = Column(String(16), nullable=False, default="running")  # running|completed|failed
     records_processed = Column(Integer, nullable=False, default=0)
 
-    faction_presences = relationship("FactionPresence", back_populates="ingestion_run")
-    pp_snapshots = relationship("PPSnapshot", back_populates="ingestion_run")
+    snapshots = relationship("PPSystemSnapshot", back_populates="ingestion_run")
 
 
 # ---------------------------------------------------------------------------
-# factions
+# pp_systems — one row per unique star system (upserted each ingest)
 # ---------------------------------------------------------------------------
 
 
-class Faction(Base):
-    """A minor faction as extracted from the Spansh bulk download."""
+class PPSystem(Base):
+    """A star system that is (or has been) under a Power's influence."""
 
-    __tablename__ = "factions"
+    __tablename__ = "pp_systems"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), unique=True, index=True, nullable=False)
-    allegiance = Column(String(128), nullable=True)
-    government = Column(String(128), nullable=True)
-
-    presences = relationship("FactionPresence", back_populates="faction")
-
-
-# ---------------------------------------------------------------------------
-# systems
-# ---------------------------------------------------------------------------
-
-
-class System(Base):
-    """A star system, keyed by its 64-bit system ID from Spansh."""
-
-    __tablename__ = "systems"
-
-    id = Column(Integer, primary_key=True, index=True)
-    # Elite Dangerous 64-bit system ID — up to ~93 quadrillion
     system_id64 = Column(BigInteger, unique=True, index=True, nullable=False)
     name = Column(String(255), nullable=False, index=True)
     x = Column(Float, nullable=True)
     y = Column(Float, nullable=True)
     z = Column(Float, nullable=True)
+    allegiance = Column(String(128), nullable=True)
+    population = Column(BigInteger, nullable=True)
 
-    presences = relationship("FactionPresence", back_populates="system")
-    pp_snapshots = relationship("PPSnapshot", back_populates="system")
+    snapshots = relationship("PPSystemSnapshot", back_populates="system")
 
 
 # ---------------------------------------------------------------------------
-# faction_presence
+# pp_system_snapshots — insert-only time-series per system per ingest run
 # ---------------------------------------------------------------------------
 
 
-class FactionPresence(Base):
+class PPSystemSnapshot(Base):
     """
-    Records that a faction has presence in a system for a given ingestion run.
+    A point-in-time snapshot of a system's Power Play state.
 
-    Rows are inserted per run; old runs' rows remain for historical reference.
-    Never updated — each run inserts fresh rows linked to its ingestion_run_id.
+    One row is inserted per system per ingestion run — never updated.
+    This gives us the full history needed for trend analysis.
     """
 
-    __tablename__ = "faction_presence"
+    __tablename__ = "pp_system_snapshots"
 
     id = Column(Integer, primary_key=True, index=True)
-    faction_id = Column(Integer, ForeignKey("factions.id"), nullable=False, index=True)
-    system_id = Column(Integer, ForeignKey("systems.id"), nullable=False, index=True)
-    is_controlling = Column(Boolean, nullable=False, default=False)
-    ingestion_run_id = Column(
-        Integer, ForeignKey("ingestion_runs.id"), nullable=False, index=True
-    )
-
-    faction = relationship("Faction", back_populates="presences")
-    system = relationship("System", back_populates="presences")
-    ingestion_run = relationship("IngestionRun", back_populates="faction_presences")
-
-
-# ---------------------------------------------------------------------------
-# pp_snapshots  (insert-only — never update)
-# ---------------------------------------------------------------------------
-
-
-class PPSnapshot(Base):
-    """
-    A time-stamped snapshot of a system's Power Play state and controlling
-    faction influence, sourced from the EDSM API.
-
-    Rows are NEVER updated — each EDSM sync appends new rows so historical
-    trends accumulate over time.
-    """
-
-    __tablename__ = "pp_snapshots"
-
-    id = Column(Integer, primary_key=True, index=True)
-    system_id = Column(Integer, ForeignKey("systems.id"), nullable=False, index=True)
-    # Power Play power name (e.g. "Aisling Duval") — nullable if system is unpopulated
-    pp_power = Column(String(255), nullable=True)
-    # Power Play state string as returned by EDSM (e.g. "Fortified", "Undermined")
-    pp_state = Column(String(64), nullable=True)
-    # Controlling faction influence 0.0–1.0; None if EDSM doesn't return it
-    influence = Column(Float, nullable=True)
+    system_id = Column(Integer, ForeignKey("pp_systems.id"), nullable=False, index=True)
+    ingestion_run_id = Column(Integer, ForeignKey("ingestion_runs.id"), nullable=False, index=True)
     snapshot_time = Column(DateTime, default=func.now(), nullable=False, index=True)
-    ingestion_run_id = Column(
-        Integer, ForeignKey("ingestion_runs.id"), nullable=True, index=True
-    )
 
-    system = relationship("System", back_populates="pp_snapshots")
-    ingestion_run = relationship("IngestionRun", back_populates="pp_snapshots")
+    # Power Play fields from Spansh dump
+    power = Column(String(128), nullable=True, index=True)   # e.g. "Arissa Lavigny-Duval"
+    power_state = Column(String(64), nullable=True)           # Fortified|Undermined|Turmoil|Expansion|Contested|HomeSystem|InPrepareRadius
+    # Reinforcement and undermining progress (raw commodity counts from Spansh)
+    reinforcement = Column(Integer, nullable=True)
+    undermining = Column(Integer, nullable=True)
+    # 0.0–1.0 control progress toward next state
+    control_progress = Column(Float, nullable=True)
+
+    system = relationship("PPSystem", back_populates="snapshots")
+    ingestion_run = relationship("IngestionRun", back_populates="snapshots")
 
 
 # ---------------------------------------------------------------------------
-# admin_settings
+# admin_settings — scoring weight key/value store
 # ---------------------------------------------------------------------------
 
 

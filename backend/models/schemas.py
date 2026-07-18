@@ -1,8 +1,4 @@
-"""Pydantic v2 response schemas for the Elite Powerplay API.
-
-All schemas use ``model_config = ConfigDict(from_attributes=True)``
-so they can be constructed directly from SQLAlchemy ORM instances.
-"""
+"""Pydantic v2 response schemas for the Elite Powerplay API."""
 
 from __future__ import annotations
 
@@ -44,57 +40,49 @@ class AdminSettingSchema(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Faction list / search
+# Power Play system entry (latest snapshot joined)
 # ---------------------------------------------------------------------------
 
 
-class FactionListItem(BaseModel):
-    model_config = _from_orm
+class PPSystemEntry(BaseModel):
+    """A system under a Power's influence, enriched with its latest PP snapshot."""
 
-    id: int
-    name: str
-    allegiance: Optional[str] = None
-    government: Optional[str] = None
-    system_count: int = 0
-
-
-class PaginatedFactions(BaseModel):
-    total: int
-    page: int
-    limit: int
-    items: list[FactionListItem]
-
-
-# ---------------------------------------------------------------------------
-# Per-system entry for a faction's territory view
-# ---------------------------------------------------------------------------
-
-
-class FactionSystemEntry(BaseModel):
-    """A system in which a faction has presence, enriched with latest PP state."""
-
-    system_name: str
     system_id64: int
-    is_controlling: bool
-    # Flat coordinates (LY)
+    name: str
     x: float
     y: float
     z: float
-    pp_state: Optional[str] = None
-    pp_power: Optional[str] = None
-    # 0.0–1.0; multiply by 100 for display as a percentage
-    influence: Optional[float] = None
-    # Computed when caller supplies a center_id query param; Euclidean LY distance
+    allegiance: Optional[str] = None
+    population: Optional[int] = None
+
+    # Latest snapshot fields
+    power: Optional[str] = None
+    power_state: Optional[str] = None
+    reinforcement: Optional[int] = None
+    undermining: Optional[int] = None
+    control_progress: Optional[float] = None
+    snapshot_time: Optional[datetime] = None
+
+    # Computed
     distance_from_center: Optional[float] = None
+    # Derived ratio 0.0–1.0 (undermining / reinforcement); None if no data
+    undermine_ratio: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
-# Powers list
+# System history point
 # ---------------------------------------------------------------------------
 
 
-class PowersList(BaseModel):
-    powers: list[str]
+class SystemHistoryPoint(BaseModel):
+    model_config = _from_orm
+
+    snapshot_time: datetime
+    power: Optional[str] = None
+    power_state: Optional[str] = None
+    reinforcement: Optional[int] = None
+    undermining: Optional[int] = None
+    control_progress: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +101,12 @@ class SystemSearchResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# System PP history
+# Powers list
 # ---------------------------------------------------------------------------
 
 
-class SystemHistoryPoint(BaseModel):
-    model_config = _from_orm
-
-    snapshot_time: datetime
-    pp_state: Optional[str] = None
-    pp_power: Optional[str] = None
-    influence: Optional[float] = None
+class PowersList(BaseModel):
+    powers: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -132,19 +115,18 @@ class SystemHistoryPoint(BaseModel):
 
 
 class RecommendationItem(BaseModel):
-    system_name: str
     system_id64: int
-    # Computed score (higher = more important action)
+    system_name: str
     score: float
-    # "fortify" or "expand"
-    type: str
-    # Human-readable explanations for the score
+    type: str                       # "fortify" | "expand"
     reasons: list[str]
+    power_state: Optional[str] = None
+    reinforcement: Optional[int] = None
+    undermining: Optional[int] = None
+    undermine_ratio: Optional[float] = None
     distance_from_center: Optional[float] = None
-    pp_state: Optional[str] = None
-    influence: Optional[float] = None
-    # "rising" | "falling" | "stable" | "unknown"
-    influence_trend: str = "unknown"
+    # "rising" | "falling" | "stable" | "unknown"  (based on undermine_ratio trend)
+    threat_trend: str = "unknown"
 
 
 class RecommendationsResponse(BaseModel):

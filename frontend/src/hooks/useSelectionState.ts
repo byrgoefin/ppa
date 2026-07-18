@@ -6,28 +6,26 @@ export interface SelectedSystem {
 }
 
 export interface SelectionState {
-  factionName: string | null;
+  powerName: string | null;
   centerSystem: SelectedSystem | null;
-  setFaction: (name: string | null) => void;
+  setPower: (name: string | null) => void;
   setCenter: (system: SelectedSystem | null) => void;
 }
 
 export function useSelectionState(): SelectionState {
   const [params, setParams] = useSearchParams();
 
-  const factionName = params.get("faction");
+  const powerName = params.get("power");
   const centerId = params.get("center_id");
   const centerName = params.get("center_name");
   const centerSystem: SelectedSystem | null =
-    centerId && centerName
-      ? { id: Number(centerId), name: centerName }
-      : null;
+    centerId && centerName ? { id: Number(centerId), name: centerName } : null;
 
-  function setFaction(name: string | null) {
+  function setPower(name: string | null) {
     setParams((prev) => {
       const next = new URLSearchParams(prev);
-      if (name) next.set("faction", name);
-      else next.delete("faction");
+      if (name) next.set("power", name);
+      else next.delete("power");
       return next;
     });
   }
@@ -46,5 +44,5 @@ export function useSelectionState(): SelectionState {
     });
   }
 
-  return { factionName, centerSystem, setFaction, setCenter };
+  return { powerName, centerSystem, setPower, setCenter };
 }

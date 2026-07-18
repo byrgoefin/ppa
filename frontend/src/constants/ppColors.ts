@@ -1,29 +1,25 @@
-/**
- * PP State color constants — shared across Table, 2D Map, and 3D Map views.
- *
- * Values match the design spec from the plan:
- *   Fortified  = #4AD94A (green)
- *   Undermined = #D94A4A (red)
- *   Turmoil    = #FF8C00 (orange)
- *   Expansion  = #4A90D9 (blue)
- *   Contested  = #D9D94A (yellow)
- *   default    = #999999 (grey)
- */
-
-export const PP_STATE_COLORS: Record<string, string> = {
-  Fortified: "#4AD94A",
-  Undermined: "#D94A4A",
-  Turmoil: "#FF8C00",
-  Expansion: "#4A90D9",
-  Contested: "#D9D94A",
-  HomeSystem: "#7c5cd8",
-  Prepared: "#3b82d4",
-  InPrepareRadius: "#3b82d4",
-  Exploited: "#aaaaaa",
-};
-
-/** Returns the color for a given PP state string, falling back to grey. */
+/** Map Power Play state strings to display colors. */
 export function ppStateColor(state: string | null | undefined): string {
-  if (!state) return "#999999";
-  return PP_STATE_COLORS[state] ?? "#999999";
+  switch (state) {
+    case "Fortified":        return "#4AD94A";
+    case "Undermined":       return "#D94A4A";
+    case "Turmoil":          return "#FF4500";
+    case "Expansion":        return "#4A90D9";
+    case "InPrepareRadius":  return "#7c5cd8";
+    case "Contested":        return "#D9A84A";
+    case "HomeSystem":       return "#FFD700";
+    case "Exploited":        return "#888";
+    default:                 return "#888";
+  }
 }
+
+export const PP_STATE_LABELS: Record<string, string> = {
+  Fortified:       "Fortified",
+  Undermined:      "Undermined",
+  Turmoil:         "Turmoil",
+  Expansion:       "Expansion",
+  InPrepareRadius: "Prepare Radius",
+  Contested:       "Contested",
+  HomeSystem:      "Home System",
+  Exploited:       "Exploited",
+};
