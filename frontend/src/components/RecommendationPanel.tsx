@@ -53,6 +53,75 @@ function DaysBar({ progress, daysToFailure }: { progress: number | null; daysToF
   );
 }
 
+// Absolute merit thresholds (must match backend scoring.py)
+const MERIT_ACQUIRE    = 120_000;
+const MERIT_FORTIFIED  = 333_000;
+const MERIT_STRONGHOLD = 667_000;
+
+function fmt(n: number): string {
+  return n.toLocaleString();
+}
+
+function MeritBar({ item }: { item: RecommendationItem }) {
+  if (item.merit_position == null || item.control_progress == null) return null;
+
+  // Determine which band we're in and the full-scale position
+  const pos = item.merit_position;
+  const pct = Math.min(100, Math.max(0, (pos / MERIT_STRONGHOLD) * 100));
+
+  // Color the fill based on progress
+  const p = item.control_progress;
+  const barColor = p <= 0   ? "#D94A4A"
+                 : p < 0.25 ? "#FF4444"
+                 : p < 0.50 ? "#FF8C00"
+                 : p < 0.75 ? "#D9A84A"
+                 : p < 1.0  ? "#4AD94A"
+                 : "#00E5CC";
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      {/* Scale bar */}
+      <div style={{ position: "relative", height: 8, borderRadius: 4, background: "#21262d", overflow: "visible", marginBottom: 2 }}>
+        {/* Threshold markers */}
+        <div style={{ position: "absolute", left: `${(MERIT_ACQUIRE / MERIT_STRONGHOLD) * 100}%`, top: -2, bottom: -2, width: 1, background: "#4A90D9", opacity: 0.6 }} title="Acquire threshold (120k)" />
+        <div style={{ position: "absolute", left: `${(MERIT_FORTIFIED / MERIT_STRONGHOLD) * 100}%`, top: -2, bottom: -2, width: 1, background: "#D9A84A", opacity: 0.6 }} title="Fortified threshold (333k)" />
+        {/* Fill */}
+        <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 4, transition: "width 0.3s" }} />
+        {/* Position marker */}
+        <div style={{ position: "absolute", left: `${pct}%`, top: -3, width: 2, height: 14, background: "#fff", borderRadius: 1, transform: "translateX(-50%)" }} />
+      </div>
+      {/* Labels */}
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#555", marginBottom: 4 }}>
+        <span>0</span>
+        <span style={{ color: "#4A90D9" }}>120k</span>
+        <span style={{ color: "#D9A84A" }}>333k</span>
+        <span>667k</span>
+      </div>
+      {/* Merit figures */}
+      <div style={{ display: "flex", gap: 12, fontSize: 11, flexWrap: "wrap" }}>
+        <span style={{ color: "#8b949e" }}>
+          Position: <strong style={{ color: "#e6edf3" }}>{fmt(pos)}</strong>
+        </span>
+        {item.buffer_merits != null && (
+          <span style={{ color: "#8b949e" }}>
+            Buffer: <strong style={{ color: p < 0.25 ? "#FF4444" : p < 0.5 ? "#FF8C00" : "#4AD94A" }}>{fmt(item.buffer_merits)}</strong>
+          </span>
+        )}
+        {item.merits_to_safety != null && item.merits_to_safety > 0 && (
+          <span style={{ color: "#8b949e" }}>
+            To safety: <strong style={{ color: "#FF8C00" }}>{fmt(item.merits_to_safety)}</strong>
+          </span>
+        )}
+        {item.merits_to_upgrade != null && item.merits_to_upgrade > 0 && (
+          <span style={{ color: "#8b949e" }}>
+            To upgrade: <strong style={{ color: "#4A90D9" }}>{fmt(item.merits_to_upgrade)}</strong>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ItemRow({ item }: { item: RecommendationItem }) {
   const band = urgencyBand(item);
   const r = item.reinforcement ?? 0;
@@ -66,7 +135,6 @@ function ItemRow({ item }: { item: RecommendationItem }) {
     }}>
       {/* Header row */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
-        {/* Urgency badge */}
         <span style={{
           background: band.fg + "22", color: band.fg, borderRadius: 3,
           padding: "1px 7px", fontSize: 10, fontWeight: 800, letterSpacing: "0.06em",
@@ -74,11 +142,7 @@ function ItemRow({ item }: { item: RecommendationItem }) {
         }}>
           {band.label}
         </span>
-
-        {/* System name */}
         <span style={{ fontWeight: 700, fontSize: 13, color: "#e6edf3", flex: 1 }}>{item.system_name}</span>
-
-        {/* PP state badge */}
         {item.power_state && (
           <span style={{
             background: ppStateColor(item.power_state), color: "#fff",
@@ -87,8 +151,6 @@ function ItemRow({ item }: { item: RecommendationItem }) {
             {PP_STATE_LABELS[item.power_state] ?? item.power_state}
           </span>
         )}
-
-        {/* Score */}
         <span style={{ fontWeight: 700, fontSize: 12, color: band.fg, flexShrink: 0, minWidth: 52, textAlign: "right" }}>
           {item.score.toFixed(0)} pts
         </span>
@@ -97,6 +159,11 @@ function ItemRow({ item }: { item: RecommendationItem }) {
       {/* Progress bar + days to failure */}
       {item.type === "fortify" && (
         <DaysBar progress={item.control_progress} daysToFailure={item.days_to_failure} />
+      )}
+
+      {/* Absolute merit position bar */}
+      {item.type === "fortify" && (
+        <MeritBar item={item} />
       )}
 
       {/* Stats row */}

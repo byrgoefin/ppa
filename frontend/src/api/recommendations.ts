@@ -12,10 +12,19 @@ export interface RecommendationItem {
   undermine_ratio: number | null;
   /** Normalized 0.0–1.0+ progress toward next state; <0 = failing now; ≥1 = upgrade ready */
   control_progress: number | null;
-  /** Estimated days until state downgrade; 0 = failing now; null = not at risk */
+  /** Estimated days until state downgrade = progress × 7; 0 = failing now; null = not at risk */
   days_to_failure: number | null;
   distance_from_center: number | null;
   threat_trend: "worsening" | "improving" | "stable" | "unknown";
+  // ── Absolute merit context (thresholds: Acquire=120k, Fortified=333k, Stronghold=667k) ──
+  /** Absolute merit position on the 0→667,000 scale */
+  merit_position: number | null;
+  /** Merits above downgrade threshold — cushion remaining */
+  buffer_merits: number | null;
+  /** Additional merits needed to reach 50% progress (safe zone) */
+  merits_to_safety: number | null;
+  /** Additional merits needed to reach 100% (next state upgrade) */
+  merits_to_upgrade: number | null;
 }
 
 export interface RecommendationsResponse {

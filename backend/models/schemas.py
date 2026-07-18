@@ -129,10 +129,20 @@ class RecommendationItem(BaseModel):
     # >= 1.0 = past upgrade threshold (no action needed / suppress)
     control_progress: Optional[float] = None
     # Estimated days until state degrades; 0.0 = failing now; None = not at risk
+    # Formula: progress × 7  (progress IS the normalized time-remaining fraction)
     days_to_failure: Optional[float] = None
     distance_from_center: Optional[float] = None
     # "worsening" | "improving" | "stable" | "unknown"
     threat_trend: str = "unknown"
+    # ── Absolute merit context (from confirmed thresholds 120k/333k/667k) ──
+    # Absolute merit position on the 0→667k scale
+    merit_position: Optional[int] = None
+    # Merits above downgrade threshold — how much cushion remains
+    buffer_merits: Optional[int] = None
+    # Additional merits needed to reach 50% progress (safe zone)
+    merits_to_safety: Optional[int] = None
+    # Additional merits needed to reach 100% (next state upgrade)
+    merits_to_upgrade: Optional[int] = None
 
 
 class RecommendationsResponse(BaseModel):
