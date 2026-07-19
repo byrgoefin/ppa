@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { getPowerSystems, PPSystemEntry } from "../api/powers";
+import { getPowerSystems, listPowers, PPSystemEntry } from "../api/powers";
 import { getRecommendations, RecommendationsResponse, RecommendationItem } from "../api/recommendations";
 import { getTargetAnalysis, TargetAnalysisItem } from "../api/targeting";
 import { useSelectionState } from "../hooks/useSelectionState";
@@ -202,17 +202,20 @@ export default function TableView() {
   useEffect(() => {
     if (!powerName) { setContestedSystems([]); return; }
     setLoadingContested(true);
-    // We need the list of other powers — fetch all systems to get unique powers
-    import("../api/powers").then(({ listPowers }) =>
-      listPowers().then(allPowers => {
+    listPowers()
+      .then(allPowers => {
         const others = allPowers.filter(p => p !== powerName);
-        if (others.length === 0) { setContestedSystems([]); setLoadingContested(false); return; }
+        if (others.length === 0) {
+          setContestedSystems([]);
+          setLoadingContested(false);
+          return;
+        }
         getTargetAnalysis(powerName, others)
           .then(r => setContestedSystems(r.targets.filter(t => t.contested)))
           .catch(() => setContestedSystems([]))
           .finally(() => setLoadingContested(false));
       })
-    ).catch(() => setLoadingContested(false));
+      .catch(() => setLoadingContested(false));
   }, [powerName]);
 
   // Default sort: by control_progress ascending (most at-risk first) when no ref;
