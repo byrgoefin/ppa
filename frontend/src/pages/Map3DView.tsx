@@ -224,7 +224,7 @@ export default function Map3DView() {
       }
       return true;
     });
-  }, [systems, centerSystem, maxDistLY, minThreatPct]);
+  }, [systems, refSystem, maxDistLY, minThreatPct]);
 
   const positions = useMemo(() => normalizeCoords(filteredSystems, layoutMode, centerObj), [filteredSystems, layoutMode, centerObj]);
   const fortifySet = useMemo(() => new Set((recommendations?.fortify ?? []).map((r) => r.system_name)), [recommendations]);

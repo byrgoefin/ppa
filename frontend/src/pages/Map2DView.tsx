@@ -162,7 +162,7 @@ export default function Map2DView() {
       }
       return true;
     });
-  }, [systems, centerSystem, maxDistLY, minThreatPct]);
+  }, [systems, refSystem, maxDistLY, minThreatPct]);
 
   const positions = useMemo(
     () => buildPositions(filteredSystems, axis, layoutMode, centerIdx),
