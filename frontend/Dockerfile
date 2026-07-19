@@ -3,9 +3,12 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
-# Install dependencies first (cached layer)
+# Install dependencies first (cached layer).
+# Use 'npm ci' when a lockfile is present (reproducible, faster),
+# fall back to 'npm install' otherwise so the first build doesn't fail
+# before the lockfile has been committed to the repo.
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # Copy source and build
 COPY . .

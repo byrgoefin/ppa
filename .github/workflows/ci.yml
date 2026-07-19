@@ -6,7 +6,11 @@
 #   frontend-build      Full Vite production build (catches bundler errors)
 #
 # These run in parallel and typically finish in ~2 minutes.
-# The docker-publish workflow only runs after these pass on master.
+# The docker-publish workflow only runs after these pass on main.
+#
+# NOTE: package-lock.json must be committed to the repo for `npm ci` to work.
+# If it is missing, `npm install` is used as a fallback and the lockfile is
+# uploaded as an artifact so it can be committed.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI
@@ -34,9 +38,10 @@ jobs:
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install dependencies (ci if lockfile present, else install)
         working-directory: frontend
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
       - name: Type-check (tsc --noEmit)
         working-directory: frontend
@@ -58,9 +63,10 @@ jobs:
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install dependencies (ci if lockfile present, else install)
         working-directory: frontend
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
       - name: Build
         working-directory: frontend
@@ -72,3 +78,13 @@ jobs:
           name: frontend-dist
           path: frontend/dist/
           retention-days: 3
+
+      # Upload generated lockfile as artifact so it can be committed to the repo
+      # (only runs when lockfile was missing — skipped when package-lock.json exists)
+      - name: Upload lockfile artifact (if newly generated)
+        if: ${{ !hashFiles('frontend/package-lock.json') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-lock-json
+          path: frontend/package-lock.json
+          retention-days: 7
