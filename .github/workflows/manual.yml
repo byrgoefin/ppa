@@ -20,4 +20,4 @@ jobs:
     steps:
     # Runs a single command using the runners shell
     - name: Send greeting
-      run: gh repo pull Rgconner/elite-powerplay-app
+      run: gh repo sync Rgconner/elite-powerplay-app
