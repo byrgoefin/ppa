@@ -3,7 +3,7 @@
 name: Manual workflow
 
 env:
-    GH_TOKEN: ${{ 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 }}
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 # Controls when the action will run. Workflow runs when manually triggered using the UI
 # or API.
 on:
